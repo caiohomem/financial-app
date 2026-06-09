@@ -146,13 +146,16 @@ public class ActivoBankPdfParserTests
 
 public class WiseCsvParserTests
 {
+    private const string CompletedOutId = "CARD_TRANSACTION-3894508368";
+    private const string CompletedInId = "BALANCE_CASHBACK-57097864";
+    private const string CancelledMadId = "CARD_TRANSACTION-3733522377";
+    private const string RefundedId = "CARD_TRANSACTION-3817952565";
+    private const string ZeroAmountId = "CARD_TRANSACTION-2683482520";
+
     [Fact]
     public void Parse_WiseCsv_ExtractsAccountAndTransactions()
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "fixtures", "wise_sample.csv");
-        using var file = File.OpenRead(path);
-
-        var result = new WiseCsvParser().Parse(file);
+        var result = ParseResult();
 
         Assert.Equal("Caio Chagas", result.AccountIdentifier);
         Assert.Equal(53, result.Transactions.Count);
@@ -163,4 +166,88 @@ public class WiseCsvParserTests
             transaction.RawDescription == "Pravda" &&
             transaction.Status == "completed");
     }
+
+    [Fact]
+    public void Parse_ExplicitDirectionAndNativeTransactionIdArePreserved()
+    {
+        var transactions = ParseResult().Transactions;
+
+        Assert.Equal("OUT", Find(transactions, CompletedOutId).Direction);
+        Assert.Equal("IN", Find(transactions, CompletedInId).Direction);
+        Assert.All(transactions, transaction =>
+            Assert.False(string.IsNullOrWhiteSpace(transaction.SourceTransactionId)));
+    }
+
+    [Fact]
+    public void Parse_CancelledAndRefundedRowsAreStoredWithTheirStatus()
+    {
+        var transactions = ParseResult().Transactions;
+
+        Assert.Equal("cancelled", Find(transactions, CancelledMadId).Status);
+        Assert.Equal("refunded", Find(transactions, RefundedId).Status);
+    }
+
+    [Fact]
+    public void Parse_RefundedFixtureHasNoSeparateInCreditRow()
+    {
+        var transactions = ParseResult().Transactions;
+        var refunded = Find(transactions, RefundedId);
+
+        Assert.Equal("OUT", refunded.Direction);
+        Assert.DoesNotContain(transactions, transaction =>
+            transaction.Direction == "IN" &&
+            transaction.SourceTransactionId == refunded.SourceTransactionId);
+    }
+
+    [Fact]
+    public void Parse_MultiCurrencyUsesOriginAmountAndCurrency()
+    {
+        var transaction = Find(ParseResult().Transactions, CancelledMadId);
+
+        Assert.Equal("MAD", transaction.Currency);
+        Assert.Equal(2000.00m, transaction.Amount);
+    }
+
+    [Fact]
+    public void Parse_ZeroAmountRowsArePreserved()
+    {
+        var transaction = Find(ParseResult().Transactions, ZeroAmountId);
+
+        Assert.Equal(0m, transaction.Amount);
+        Assert.Equal("refunded", transaction.Status);
+    }
+
+    [Fact]
+    public void Parse_MerchantAndCategoryAreMapped()
+    {
+        var transaction = Find(ParseResult().Transactions, CompletedOutId);
+
+        Assert.Equal("Pravda", transaction.RawDescription);
+        Assert.Equal("Compras", transaction.CategorySource);
+    }
+
+    [Fact]
+    public void Parse_ReimportProducesTheSameNativeDeduplicationKeys()
+    {
+        var firstImport = ParseResult().Transactions;
+        var secondImport = ParseResult().Transactions;
+
+        Assert.Equal(
+            firstImport.Select(transaction => transaction.SourceTransactionId),
+            secondImport.Select(transaction => transaction.SourceTransactionId));
+    }
+
+    private static StatementParseResult ParseResult()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "fixtures", "wise_sample.csv");
+        using var file = File.OpenRead(path);
+
+        return new WiseCsvParser().Parse(file);
+    }
+
+    private static ParsedTransaction Find(
+        IEnumerable<ParsedTransaction> transactions,
+        string sourceTransactionId) =>
+        Assert.Single(transactions, transaction =>
+            transaction.SourceTransactionId == sourceTransactionId);
 }

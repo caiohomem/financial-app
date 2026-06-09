@@ -32,6 +32,8 @@ public sealed class WiseCsvParser : IStatementParser
                 .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
             ?? "wise-default";
 
+        // The real Wise fixture marks the original OUT row as refunded and does
+        // not include a separate IN credit row.
         var transactions = rows.Select(row => new ParsedTransaction(
             string.IsNullOrWhiteSpace(row.BeneficiaryName)
                 ? row.Reference ?? row.Message ?? row.TransferNumber
