@@ -66,6 +66,36 @@ public class ImportEndpointTests
             WHERE source = 'wise'
               AND normalized_merchant IS NULL;
             """));
+        Assert.Equal(0, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM transactions
+            WHERE source = 'wise'
+              AND category_source IS NOT NULL
+              AND category_canonical_id IS NULL;
+            """));
+        Assert.Equal(0, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM (
+                VALUES
+                    ('Glovo'),
+                    ('Uber Eats'),
+                    ('Bolt'),
+                    ('Metropolitano De Lisboa'),
+                    ('Generali'),
+                    ('Endesa'),
+                    ('Vodafone'),
+                    ('Cetelem'),
+                    ('A.M.O.Brewery'),
+                    ('Cerveja Canil')
+            ) AS known(pattern)
+            JOIN transactions ON transactions.source = 'activobank'
+            WHERE transactions.normalized_merchant ILIKE '%' || known.pattern || '%'
+              AND transactions.category_canonical_id IS NULL;
+            """));
         Assert.Equal(activoFirst.Imported, await ScalarInt(
             connection,
             "SELECT count(*) FROM transactions WHERE source = 'activobank';"));
