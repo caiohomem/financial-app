@@ -51,6 +51,23 @@ public class ImportEndpointTests
             """));
         Assert.Equal(activoFirst.Imported, await ScalarInt(
             connection,
+            """
+            SELECT count(*)
+            FROM transactions
+            WHERE source = 'activobank'
+              AND normalized_merchant IS NOT NULL
+              AND normalized_merchant <> raw_description;
+            """));
+        Assert.Equal(wiseFirst.Imported, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM transactions
+            WHERE source = 'wise'
+              AND normalized_merchant IS NULL;
+            """));
+        Assert.Equal(activoFirst.Imported, await ScalarInt(
+            connection,
             "SELECT count(*) FROM transactions WHERE source = 'activobank';"));
     }
 
@@ -83,6 +100,7 @@ public class ImportEndpointTests
     {
         var transaction = new Ingestion.ParsedTransaction(
             "COMPRA A.M.O.BREWERY",
+            "A.M.O.Brewery",
             5.19m,
             "OUT",
             new DateOnly(2026, 4, 1),

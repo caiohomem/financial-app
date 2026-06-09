@@ -301,13 +301,13 @@ public partial class Program
         command.CommandText = """
             INSERT INTO transactions (
                 account_id, source, source_transaction_id, booking_date, value_date,
-                raw_description, amount, direction, currency, running_balance, status,
-                category_source, import_batch_id, dedup_hash
+                raw_description, normalized_merchant, amount, direction, currency,
+                running_balance, status, category_source, import_batch_id, dedup_hash
             )
             VALUES (
                 @accountId, @source, @sourceTransactionId, @bookingDate, @valueDate,
-                @rawDescription, @amount, @direction, @currency, @runningBalance, @status,
-                @categorySource, @batchId, @dedupHash
+                @rawDescription, @normalizedMerchant, @amount, @direction, @currency,
+                @runningBalance, @status, @categorySource, @batchId, @dedupHash
             );
             """;
         command.Parameters.AddWithValue("accountId", accountId);
@@ -316,6 +316,7 @@ public partial class Program
         command.Parameters.AddWithValue("bookingDate", NpgsqlDbType.Date, item.BookingDate);
         AddNullable(command, "valueDate", NpgsqlDbType.Date, item.ValueDate);
         command.Parameters.AddWithValue("rawDescription", item.RawDescription);
+        AddNullable(command, "normalizedMerchant", NpgsqlDbType.Text, item.NormalizedMerchant);
         command.Parameters.AddWithValue("amount", item.Amount);
         command.Parameters.AddWithValue("direction", item.Direction);
         command.Parameters.AddWithValue("currency", item.Currency);
