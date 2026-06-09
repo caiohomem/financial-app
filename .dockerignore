@@ -1,0 +1,10 @@
+.git
+.gitignore
+.agent
+.env
+.env.*
+**/.vs
+**/bin
+**/obj
+**/node_modules
+src/Web
