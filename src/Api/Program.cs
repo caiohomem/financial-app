@@ -207,6 +207,7 @@ public partial class Program
         var imported = 0;
         var ignored = 0;
         var byStatus = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var evaluator = await CategoryEvaluator.LoadAsync(connection, transaction);
 
         foreach (var item in transactions)
         {
@@ -217,6 +218,10 @@ public partial class Program
                 continue;
             }
 
+            var categoryCanonicalId = evaluator.Evaluate(
+                item.CategorySource,
+                item.NormalizedMerchant,
+                item.RawDescription);
             await InsertTransactionAsync(
                 connection,
                 transaction,
@@ -224,7 +229,8 @@ public partial class Program
                 accountId,
                 batchId,
                 item,
-                dedupHash);
+                dedupHash,
+                categoryCanonicalId);
             imported++;
             byStatus[item.Status] = byStatus.GetValueOrDefault(item.Status) + 1;
         }
@@ -294,7 +300,8 @@ public partial class Program
         int accountId,
         int batchId,
         ParsedTransaction item,
-        string? dedupHash)
+        string? dedupHash,
+        int? categoryCanonicalId)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -302,12 +309,12 @@ public partial class Program
             INSERT INTO transactions (
                 account_id, source, source_transaction_id, booking_date, value_date,
                 raw_description, normalized_merchant, amount, direction, currency,
-                running_balance, status, category_source, import_batch_id, dedup_hash
+                running_balance, status, category_canonical_id, category_source, import_batch_id, dedup_hash
             )
             VALUES (
                 @accountId, @source, @sourceTransactionId, @bookingDate, @valueDate,
                 @rawDescription, @normalizedMerchant, @amount, @direction, @currency,
-                @runningBalance, @status, @categorySource, @batchId, @dedupHash
+                @runningBalance, @status, @categoryCanonicalId, @categorySource, @batchId, @dedupHash
             );
             """;
         command.Parameters.AddWithValue("accountId", accountId);
@@ -322,6 +329,7 @@ public partial class Program
         command.Parameters.AddWithValue("currency", item.Currency);
         AddNullable(command, "runningBalance", NpgsqlDbType.Numeric, item.RunningBalance);
         command.Parameters.AddWithValue("status", item.Status);
+        AddNullable(command, "categoryCanonicalId", NpgsqlDbType.Integer, categoryCanonicalId);
         AddNullable(command, "categorySource", NpgsqlDbType.Text, item.CategorySource);
         command.Parameters.AddWithValue("batchId", batchId);
         AddNullable(command, "dedupHash", NpgsqlDbType.Text, dedupHash);

@@ -32,6 +32,9 @@ public class MigrationTests
         Assert.Equal(10, await ScalarInt(
             connection,
             "SELECT count(*) FROM category_mappings WHERE source = 'wise';"));
+        Assert.Equal(24, await ScalarInt(
+            connection,
+            "SELECT count(*) FROM rules;"));
         Assert.Equal(2, await ScalarInt(
             connection,
             """
@@ -62,6 +65,43 @@ public class MigrationTests
                 FROM category_mappings
                 WHERE source = 'wise'
                   AND source_label = source_labels.label
+            );
+            """));
+        Assert.Equal(0, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM (VALUES
+                ('Glovo', 'merchant_eq'),
+                ('Uber Eats', 'merchant_eq'),
+                ('Barto', 'merchant_eq'),
+                ('Cerveja Canil', 'merchant_eq'),
+                ('Cerveja Musa', 'merchant_eq'),
+                ('Festival Das Francesinhas', 'merchant_eq'),
+                ('Google One', 'merchant_eq'),
+                ('Transferwise', 'merchant_eq'),
+                ('A.M.O.Brewery', 'contains'),
+                ('Barto', 'contains'),
+                ('Bolt.Eu', 'contains'),
+                ('Bolt.Eur', 'contains'),
+                ('Bolt.Euo', 'contains'),
+                ('Cerveja Canil', 'contains'),
+                ('Cetelem', 'contains'),
+                ('Endesa', 'contains'),
+                ('Festival Das Francesinhas', 'contains'),
+                ('Generali', 'contains'),
+                ('Google One', 'contains'),
+                ('Metropolitano De Lisboa', 'contains'),
+                ('Uber One', 'contains'),
+                ('Vodafone', 'contains'),
+                ('A.M.O.BREWERY', 'contains'),
+                ('Brewery', 'contains')
+            ) AS expected(pattern, match_type)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM rules
+                WHERE rules.pattern = expected.pattern
+                  AND rules.match_type = expected.match_type
             );
             """));
 
