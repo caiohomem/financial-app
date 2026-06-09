@@ -39,6 +39,18 @@ public class ActivoBankPdfParserTests
     }
 
     [Fact]
+    public void Parse_ExtractsAccountIdentifierFromStatementHeader()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "fixtures", "activo_2026_004.pdf");
+        using var file = File.OpenRead(path);
+
+        var result = new ActivoBankPdfParser().Parse(file);
+
+        Assert.NotEqual("activobank-default", result.AccountIdentifier);
+        Assert.False(string.IsNullOrWhiteSpace(result.AccountIdentifier));
+    }
+
+    [Fact]
     public void Parse_NormalizesThousandsSeparatedBySpaces()
     {
         var transactions = ParseFixture("activo_2026_005.pdf");
@@ -119,7 +131,7 @@ public class ActivoBankPdfParserTests
         var path = Path.Combine(AppContext.BaseDirectory, "fixtures", fixture);
         using var file = File.OpenRead(path);
 
-        return new ActivoBankPdfParser().Parse(file).ToList();
+        return new ActivoBankPdfParser().Parse(file).Transactions.ToList();
     }
 
     private static decimal GetInitialBalance(ParsedTransaction firstTransaction)
@@ -135,11 +147,20 @@ public class ActivoBankPdfParserTests
 public class WiseCsvParserTests
 {
     [Fact]
-    public void Parse_WiseCsv_FixtureExists()
+    public void Parse_WiseCsv_ExtractsAccountAndTransactions()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "fixtures", "wise_sample.csv");
+        using var file = File.OpenRead(path);
 
-        Assert.True(File.Exists(path), $"Fixture not found: {path}");
-        // TODO: Parse this fixture with WiseCsvParser when it is implemented.
+        var result = new WiseCsvParser().Parse(file);
+
+        Assert.Equal("Caio Chagas", result.AccountIdentifier);
+        Assert.Equal(53, result.Transactions.Count);
+        Assert.All(result.Transactions, transaction =>
+            Assert.False(string.IsNullOrWhiteSpace(transaction.SourceTransactionId)));
+        Assert.Contains(result.Transactions, transaction =>
+            transaction.SourceTransactionId == "CARD_TRANSACTION-3894508368" &&
+            transaction.RawDescription == "Pravda" &&
+            transaction.Status == "completed");
     }
 }

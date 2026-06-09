@@ -15,7 +15,7 @@ public class ParserRegistryTests
 
     private sealed class StubStatementParser : IStatementParser
     {
-        public IEnumerable<ParsedTransaction> Parse(Stream file) =>
-            Enumerable.Empty<ParsedTransaction>();
+        public StatementParseResult Parse(Stream file) =>
+            new("stub", []);
     }
 }
