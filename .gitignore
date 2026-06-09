@@ -1,0 +1,16 @@
+.env
+
+# .NET
+.vs/
+bin/
+obj/
+*.user
+
+# Node.js
+node_modules/
+.next/
+npm-debug.log*
+
+# OS/editor
+.DS_Store
+Thumbs.db
