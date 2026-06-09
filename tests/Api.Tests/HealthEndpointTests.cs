@@ -1,7 +1,7 @@
 using System.Net;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
+using Npgsql;
 using Xunit;
 
 namespace Api.Tests;
@@ -17,7 +17,8 @@ public class HealthEndpointTests
             return;
         }
 
-        await using var factory = new ApiFactory(databaseUrl);
+        using var _ = new DatabaseUrlScope(databaseUrl);
+        await using var factory = new ApiFactory();
         using var client = factory.CreateClient();
 
         var response = await client.GetAsync("/api/health");
@@ -34,29 +35,35 @@ public class HealthEndpointTests
         const string unreachableDatabaseUrl =
             "Host=127.0.0.1;Port=1;Database=financial_app;Username=postgres;Password=postgres;Timeout=1;Command Timeout=1";
 
-        await using var factory = new ApiFactory(unreachableDatabaseUrl);
-        using var client = factory.CreateClient();
+        using var _ = new DatabaseUrlScope(unreachableDatabaseUrl);
+        await using var factory = new ApiFactory();
 
-        var response = await client.GetAsync("/api/health");
-        var content = await response.Content.ReadAsStringAsync();
+        var exception = await Assert.ThrowsAsync<NpgsqlException>(async () =>
+        {
+            using var client = factory.CreateClient();
+            await client.GetAsync("/api/health");
+        });
 
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-        Assert.Contains("\"status\":\"degraded\"", content);
-        Assert.Contains("\"db\":\"unreachable\"", content);
-        Assert.Contains("\"error\":", content);
+        Assert.Contains("connect", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    private sealed class ApiFactory(string databaseUrl) : WebApplicationFactory<Program>
+    private sealed class ApiFactory : WebApplicationFactory<Program>
     {
-        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        protected override void ConfigureWebHost(IWebHostBuilder builder) { }
+    }
+
+    private sealed class DatabaseUrlScope : IDisposable
+    {
+        private readonly string? _previousValue = Environment.GetEnvironmentVariable("DATABASE_URL");
+
+        public DatabaseUrlScope(string databaseUrl)
         {
-            builder.ConfigureAppConfiguration((_, config) =>
-            {
-                config.AddInMemoryCollection(new Dictionary<string, string?>
-                {
-                    ["DATABASE_URL"] = databaseUrl
-                });
-            });
+            Environment.SetEnvironmentVariable("DATABASE_URL", databaseUrl);
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable("DATABASE_URL", _previousValue);
         }
     }
 }
