@@ -15,4 +15,8 @@
     <EmbeddedResource Include="Migrations\*.sql" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../Ingestion/Ingestion.csproj" />
+  </ItemGroup>
+
 </Project>

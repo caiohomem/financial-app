@@ -10,13 +10,14 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
 {
     private const decimal BalanceTolerance = 0.005m;
 
-    public IEnumerable<ParsedTransaction> Parse(Stream file)
+    public StatementParseResult Parse(Stream file)
     {
         ArgumentNullException.ThrowIfNull(file);
 
         using var document = PdfDocument.Open(file);
         var lines = ExtractLines(document);
         var (startDate, endDate) = ParseStatementPeriod(lines);
+        var accountIdentifier = ParseAccountIdentifier(lines);
 
         decimal? previousBalance = null;
         string? pendingDescription = null;
@@ -68,13 +69,13 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
                 "EUR",
                 parsedLine.RunningBalance,
                 null,
-                "posted",
+                "completed",
                 null));
 
             previousBalance = parsedLine.RunningBalance;
         }
 
-        return transactions;
+        return new StatementParseResult(accountIdentifier, transactions);
     }
 
     internal static DateOnly ResolveDate(string monthAndDay, DateOnly startDate, DateOnly endDate)
@@ -143,6 +144,21 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
         return (
             DateOnly.ParseExact(match.Groups["start"].Value, "yyyy/MM/dd", CultureInfo.InvariantCulture),
             DateOnly.ParseExact(match.Groups["end"].Value, "yyyy/MM/dd", CultureInfo.InvariantCulture));
+    }
+
+    private static string ParseAccountIdentifier(IReadOnlyList<PdfLine> lines)
+    {
+        var text = string.Join(" ", lines.Select(line => line.Text));
+        var ibanMatch = IbanRegex().Match(text);
+        if (ibanMatch.Success)
+        {
+            return Regex.Replace(ibanMatch.Value, @"\s+", string.Empty);
+        }
+
+        var depositMatch = DepositNumberRegex().Match(text);
+        return depositMatch.Success
+            ? Regex.Replace(depositMatch.Groups["number"].Value, @"\s+", string.Empty)
+            : "activobank-default";
     }
 
     private static bool TryParseInitialBalance(string line, out decimal balance)
@@ -275,4 +291,12 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
 
     [GeneratedRegex(@"(?<![\d.])[+-]?\s*(?:\d{1,3}(?:\s+\d{3})+|\d+)\.\d{2}(?!\d)")]
     private static partial Regex AmountRegex();
+
+    [GeneratedRegex(@"PT\s*50(?:\s*\d){21}", RegexOptions.IgnoreCase)]
+    private static partial Regex IbanRegex();
+
+    [GeneratedRegex(
+        @"DEP[ÓO]SITO\s+A\s+ORDEM\s*:?\s*(?<number>\d{6,})",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex DepositNumberRegex();
 }
