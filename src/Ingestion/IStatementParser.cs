@@ -2,5 +2,5 @@ namespace Ingestion;
 
 public interface IStatementParser
 {
-    IEnumerable<ParsedTransaction> Parse(Stream file);
+    StatementParseResult Parse(Stream file);
 }

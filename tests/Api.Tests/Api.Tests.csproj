@@ -21,4 +21,9 @@
     <ProjectReference Include="..\..\src\Api\Api.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="../fixtures/**/*" Link="fixtures/%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
