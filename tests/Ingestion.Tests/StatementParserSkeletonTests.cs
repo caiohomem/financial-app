@@ -69,6 +69,7 @@ public class ActivoBankPdfParserTests
 
         Assert.Equal("IN", transaction.Direction);
         Assert.Equal("TRF. P/O UNA SEGUROS DE VIDA S A 0504179", transaction.RawDescription);
+        Assert.Equal("Una Seguros De Vida S A 0504179", transaction.NormalizedMerchant);
     }
 
     [Fact]
@@ -91,6 +92,20 @@ public class ActivoBankPdfParserTests
             transaction.BookingDate == new DateOnly(2026, 5, 18) &&
             transaction.ValueDate == new DateOnly(2026, 5, 16));
         Assert.All(transactions, transaction => Assert.NotNull(transaction.RunningBalance));
+    }
+
+    [Theory]
+    [InlineData("activo_2026_004.pdf")]
+    [InlineData("activo_2026_005.pdf")]
+    public void Parse_PopulatesNormalizedMerchantWithoutChangingRawDescription(string fixture)
+    {
+        var transactions = ParseFixture(fixture);
+
+        Assert.All(transactions, transaction =>
+        {
+            Assert.False(string.IsNullOrWhiteSpace(transaction.RawDescription));
+            Assert.False(string.IsNullOrWhiteSpace(transaction.NormalizedMerchant));
+        });
     }
 
     [Theory]
@@ -237,6 +252,14 @@ public class WiseCsvParserTests
             secondImport.Select(transaction => transaction.SourceTransactionId));
     }
 
+    [Fact]
+    public void Parse_WiseLeavesNormalizedMerchantNull()
+    {
+        var transactions = ParseResult().Transactions;
+
+        Assert.All(transactions, transaction => Assert.Null(transaction.NormalizedMerchant));
+    }
+
     private static StatementParseResult ParseResult()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "fixtures", "wise_sample.csv");
@@ -250,4 +273,21 @@ public class WiseCsvParserTests
         string sourceTransactionId) =>
         Assert.Single(transactions, transaction =>
             transaction.SourceTransactionId == sourceTransactionId);
+}
+
+public class MerchantNormalizerTests
+{
+    [Theory]
+    [InlineData("COMPRA 5542 GLOVO LISBOA PT", "Glovo")]
+    [InlineData("COMPRA 5542 UBER EATS HELP.UBER.COMNL", "Uber Eats")]
+    [InlineData("PAGSERV ENDESA ENERGIA", "Endesa")]
+    [InlineData("DD NOS COMUNICACOES", "NOS Comunicacoes")]
+    [InlineData("TRF. P/O UNA SEGUROS DE VIDA S A 0504179", "Una Seguros De Vida S A 0504179")]
+    public void Normalize_StripsNoisyPrefixesAndSuffixes(string raw, string expected)
+    {
+        var normalized = MerchantNormalizer.Normalize(raw);
+
+        Assert.Equal(expected, normalized);
+        Assert.NotEqual(normalized, raw);
+    }
 }

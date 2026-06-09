@@ -38,6 +38,7 @@ public sealed class WiseCsvParser : IStatementParser
             string.IsNullOrWhiteSpace(row.BeneficiaryName)
                 ? row.Reference ?? row.Message ?? row.TransferNumber
                 : row.BeneficiaryName,
+            null,
             row.SourceAmount,
             row.Direction,
             ParseBookingDate(row.CompletedAt, row.CreatedAt),

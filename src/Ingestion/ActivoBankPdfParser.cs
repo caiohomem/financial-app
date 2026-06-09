@@ -62,6 +62,7 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
 
             transactions.Add(new ParsedTransaction(
                 rawDescription,
+                MerchantNormalizer.Normalize(rawDescription),
                 Math.Abs(delta),
                 delta > 0 ? "IN" : "OUT",
                 ResolveDate(parsedLine.BookingDate, startDate, endDate),
