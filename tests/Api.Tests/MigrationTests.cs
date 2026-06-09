@@ -28,6 +28,43 @@ public class MigrationTests
         await AssertRelationExists(connection, "idx_transactions_source_source_transaction_id");
         await AssertRelationExists(connection, "idx_transactions_dedup_hash");
 
+        Assert.Equal(13, await ScalarInt(connection, "SELECT count(*) FROM categories;"));
+        Assert.Equal(10, await ScalarInt(
+            connection,
+            "SELECT count(*) FROM category_mappings WHERE source = 'wise';"));
+        Assert.Equal(2, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM categories child
+            JOIN categories parent ON parent.id = child.parent_id
+            WHERE parent.name = 'Alimentacao'
+              AND child.name IN ('Restaurantes', 'Supermercado');
+            """));
+        Assert.Equal(0, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM (VALUES
+                ('Alimentação (restaurantes e afins)'),
+                ('Compras no mercado'),
+                ('Dinheiro adicionado'),
+                ('Dinheiro em espécie'),
+                ('Compras'),
+                ('Contas'),
+                ('Entretenimento'),
+                ('Geral'),
+                ('Recompensas'),
+                ('Transporte')
+            ) AS source_labels(label)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM category_mappings
+                WHERE source = 'wise'
+                  AND source_label = source_labels.label
+            );
+            """));
+
         await using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO import_batches (source, filename, row_count)
@@ -69,6 +106,13 @@ public class MigrationTests
 
         var result = await command.ExecuteScalarAsync();
         Assert.Equal($"public.{relationName}", result);
+    }
+
+    private static async Task<int> ScalarInt(NpgsqlConnection connection, string sql)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt32(await command.ExecuteScalarAsync());
     }
 
     private sealed class ApiFactory : WebApplicationFactory<Program>
