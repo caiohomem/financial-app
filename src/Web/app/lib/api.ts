@@ -30,6 +30,41 @@ export type DashboardTransaction = {
   source: string;
 };
 
+export type ReviewTransaction = {
+  id: number;
+  date: string;
+  normalizedMerchant: string | null;
+  rawDescription: string;
+  amount: number;
+  accountId: number;
+  categoryCanonicalId: number | null;
+  categoryName: string | null;
+  currency: string;
+};
+
+export type RuleSuggestion = {
+  id: number;
+  transactionId: number;
+  normalizedMerchant: string | null;
+  suggestedPattern: string;
+  suggestedMatchType: "merchant_eq" | "contains" | "regex";
+  categoryCanonicalId: number;
+  categoryName: string;
+  confidence: number;
+};
+
+export type Category = {
+  id: number;
+  name: string;
+};
+
+export type UpdateTransactionCategoryInput = {
+  categoryId: number;
+  createRule: boolean;
+  matchType?: "merchant_eq" | "contains" | "regex";
+  pattern?: string;
+};
+
 type TransactionFilters = {
   month?: string;
   account?: string;
@@ -37,10 +72,12 @@ type TransactionFilters = {
   search?: string;
 };
 
-async function apiFetch<T>(path: string): Promise<T> {
+async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
+    ...init,
     headers: {
       Accept: "application/json",
+      ...(init?.headers ?? {}),
     },
     cache: "no-store",
   });
@@ -50,6 +87,22 @@ async function apiFetch<T>(path: string): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+async function apiSend(path: string, init: RequestInit) {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
 }
 
 export function getAccounts() {
@@ -82,4 +135,37 @@ export function getTransactions(filters: TransactionFilters = {}) {
 
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return apiFetch<DashboardTransaction[]>(`/api/transactions${suffix}`);
+}
+
+export function getReviewTransactions() {
+  return apiFetch<ReviewTransaction[]>("/api/review/transactions");
+}
+
+export function getRuleSuggestions() {
+  return apiFetch<RuleSuggestion[]>("/api/review/rule-suggestions");
+}
+
+export function getCategories() {
+  return apiFetch<Category[]>("/api/categories");
+}
+
+export function patchTransactionCategory(id: number, body: UpdateTransactionCategoryInput) {
+  return apiSend(`/api/transactions/${id}/category`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function approveRuleSuggestion(id: number) {
+  return apiSend(`/api/review/rule-suggestions/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function rejectRuleSuggestion(id: number) {
+  return apiSend(`/api/review/rule-suggestions/${id}/reject`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }

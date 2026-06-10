@@ -32,6 +32,7 @@ builder.Services.AddHttpClient<IMonthlyReportService, MonthlyReportService>(clie
 {
     client.BaseAddress = new Uri("https://api.anthropic.com/");
 });
+builder.Services.AddSingleton<RuleManager>();
 
 var connectionString = builder.Configuration["DATABASE_URL"]
     ?? throw new InvalidOperationException(
@@ -143,6 +144,191 @@ app.MapGet(
             cancellationToken);
 
         return Results.Ok(transactions);
+    });
+
+app.MapGet(
+    "/api/review/transactions",
+    async (CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var transactions = await Program.LoadReviewTransactionsAsync(connection, cancellationToken);
+        return Results.Ok(transactions);
+    });
+
+app.MapGet(
+    "/api/review/rule-suggestions",
+    async (CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var suggestions = await Program.LoadPendingRuleSuggestionsAsync(connection, cancellationToken);
+        return Results.Ok(suggestions);
+    });
+
+app.MapGet(
+    "/api/categories",
+    async (CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var categories = await Program.LoadCategoriesAsync(connection, cancellationToken);
+        return Results.Ok(categories);
+    });
+
+app.MapPatch(
+    "/api/transactions/{id:int}/category",
+    async (
+        int id,
+        UpdateTransactionCategoryRequest request,
+        RuleManager ruleManager,
+        CancellationToken cancellationToken) =>
+    {
+        if (!Program.IsSupportedMatchType(request.MatchType))
+        {
+            return Results.BadRequest(new { error = "Unsupported matchType." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        if (!await Program.CategoryExistsAsync(connection, transaction, request.CategoryId, cancellationToken))
+        {
+            return Results.NotFound(new { error = $"Category {request.CategoryId} was not found." });
+        }
+
+        var transactionDetails = await Program.LoadReviewTransactionDetailsAsync(
+            connection,
+            transaction,
+            id,
+            cancellationToken);
+        if (transactionDetails is null)
+        {
+            return Results.NotFound(new { error = $"Transaction {id} was not found." });
+        }
+
+        await Program.UpdateTransactionCategoryAsync(
+            connection,
+            transaction,
+            id,
+            request.CategoryId,
+            cancellationToken);
+        await Program.RejectPendingSuggestionsForTransactionAsync(
+            connection,
+            transaction,
+            id,
+            cancellationToken);
+
+        RuleCreationResult? ruleResult = null;
+        if (request.CreateRule)
+        {
+            var pattern = Program.ResolveRulePattern(request.Pattern, transactionDetails);
+            if (string.IsNullOrWhiteSpace(pattern))
+            {
+                return Results.BadRequest(new { error = "Rule pattern cannot be empty." });
+            }
+
+            var matchType = string.IsNullOrWhiteSpace(request.MatchType)
+                ? "merchant_eq"
+                : request.MatchType.Trim();
+
+            ruleResult = await ruleManager.CreateRuleAndRecategorizeAsync(
+                connection,
+                transaction,
+                pattern,
+                matchType,
+                request.CategoryId,
+                cancellationToken);
+
+            if (!ruleResult.Created)
+            {
+                return Results.Conflict(new { error = "A rule with the same pattern and match type already exists." });
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+
+        return Results.Ok(new
+        {
+            transactionId = id,
+            categoryId = request.CategoryId,
+            ruleCreated = ruleResult?.Created ?? false,
+            recategorizedTransactions = ruleResult?.RecategorizedTransactions ?? 0
+        });
+    });
+
+app.MapPost(
+    "/api/review/rule-suggestions/{id:int}/approve",
+    async (int id, RuleManager ruleManager, CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        var suggestion = await Program.LoadPendingRuleSuggestionForApprovalAsync(
+            connection,
+            transaction,
+            id,
+            cancellationToken);
+        if (suggestion is null)
+        {
+            return Results.NotFound(new { error = $"Pending rule suggestion {id} was not found." });
+        }
+
+        var ruleResult = await ruleManager.CreateRuleAndRecategorizeAsync(
+            connection,
+            transaction,
+            suggestion.Pattern,
+            suggestion.MatchType,
+            suggestion.CategoryId,
+            cancellationToken);
+        if (!ruleResult.Created)
+        {
+            return Results.Conflict(new { error = "A rule with the same pattern and match type already exists." });
+        }
+
+        await Program.UpdateRuleSuggestionStatusAsync(
+            connection,
+            transaction,
+            id,
+            "approved",
+            cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
+
+        return Results.Ok(new
+        {
+            suggestionId = id,
+            status = "approved",
+            recategorizedTransactions = ruleResult.RecategorizedTransactions
+        });
+    });
+
+app.MapPost(
+    "/api/review/rule-suggestions/{id:int}/reject",
+    async (int id, CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        var updated = await Program.UpdateRuleSuggestionStatusAsync(
+            connection,
+            transaction,
+            id,
+            "rejected",
+            cancellationToken);
+        if (updated == 0)
+        {
+            return Results.NotFound(new { error = $"Pending rule suggestion {id} was not found." });
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return Results.Ok(new { suggestionId = id, status = "rejected" });
     });
 
 app.MapGet(
@@ -882,6 +1068,117 @@ public partial class Program
         return transactions;
     }
 
+    internal static async Task<IReadOnlyList<ReviewTransactionItem>> LoadReviewTransactionsAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var transactions = new List<ReviewTransactionItem>();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                transactions.id,
+                transactions.booking_date,
+                transactions.normalized_merchant,
+                transactions.raw_description,
+                transactions.amount,
+                transactions.account_id,
+                transactions.category_canonical_id,
+                categories.name AS category_name,
+                transactions.currency
+            FROM transactions
+            LEFT JOIN categories ON categories.id = transactions.category_canonical_id
+            WHERE transactions.category_canonical_id IS NULL
+               OR EXISTS (
+                   SELECT 1
+                   FROM rule_suggestions
+                   WHERE rule_suggestions.transaction_id = transactions.id
+                     AND rule_suggestions.status = 'pending'
+               )
+            ORDER BY transactions.booking_date DESC, transactions.id DESC;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            transactions.Add(new ReviewTransactionItem(
+                reader.GetInt32(0),
+                DateOnly.FromDateTime(reader.GetDateTime(1)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetString(3),
+                reader.GetDecimal(4),
+                reader.GetInt32(5),
+                reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.GetString(8)));
+        }
+
+        return transactions;
+    }
+
+    internal static async Task<IReadOnlyList<RuleSuggestionItem>> LoadPendingRuleSuggestionsAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var suggestions = new List<RuleSuggestionItem>();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                rule_suggestions.id,
+                rule_suggestions.transaction_id,
+                transactions.normalized_merchant,
+                rule_suggestions.suggested_pattern,
+                rule_suggestions.suggested_match_type,
+                rule_suggestions.category_canonical_id,
+                categories.name,
+                rule_suggestions.confidence
+            FROM rule_suggestions
+            JOIN transactions ON transactions.id = rule_suggestions.transaction_id
+            JOIN categories ON categories.id = rule_suggestions.category_canonical_id
+            WHERE rule_suggestions.status = 'pending'
+            ORDER BY rule_suggestions.created_at DESC, rule_suggestions.id DESC;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            suggestions.Add(new RuleSuggestionItem(
+                reader.GetInt32(0),
+                reader.GetInt32(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetInt32(5),
+                reader.GetString(6),
+                reader.GetDouble(7)));
+        }
+
+        return suggestions;
+    }
+
+    internal static async Task<IReadOnlyList<CategoryItem>> LoadCategoriesAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var categories = new List<CategoryItem>();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, name
+            FROM categories
+            ORDER BY name ASC;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            categories.Add(new CategoryItem(reader.GetInt32(0), reader.GetString(1)));
+        }
+
+        return categories;
+    }
+
     private static async Task<bool> TransactionExistsAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
@@ -921,6 +1218,136 @@ public partial class Program
         }
 
         return (bool)(await command.ExecuteScalarAsync())!;
+    }
+
+    private static async Task<bool> CategoryExistsAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int categoryId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT EXISTS (
+                SELECT 1
+                FROM categories
+                WHERE id = @categoryId
+            );
+            """;
+        command.Parameters.AddWithValue("categoryId", categoryId);
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
+    }
+
+    private static async Task<ReviewTransactionDetails?> LoadReviewTransactionDetailsAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int id,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT normalized_merchant, raw_description
+            FROM transactions
+            WHERE id = @id;
+            """;
+        command.Parameters.AddWithValue("id", id);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new ReviewTransactionDetails(
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.GetString(1));
+    }
+
+    private static async Task UpdateTransactionCategoryAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int id,
+        int categoryId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE transactions
+            SET category_canonical_id = @categoryId
+            WHERE id = @id;
+            """;
+        command.Parameters.AddWithValue("categoryId", categoryId);
+        command.Parameters.AddWithValue("id", id);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<PendingRuleSuggestionApproval?> LoadPendingRuleSuggestionForApprovalAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int id,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT suggested_pattern, suggested_match_type, category_canonical_id
+            FROM rule_suggestions
+            WHERE id = @id
+              AND status = 'pending';
+            """;
+        command.Parameters.AddWithValue("id", id);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new PendingRuleSuggestionApproval(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetInt32(2));
+    }
+
+    private static async Task<int> UpdateRuleSuggestionStatusAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int id,
+        string status,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE rule_suggestions
+            SET status = @status
+            WHERE id = @id
+              AND status = 'pending';
+            """;
+        command.Parameters.AddWithValue("status", status);
+        command.Parameters.AddWithValue("id", id);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task RejectPendingSuggestionsForTransactionAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int transactionId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE rule_suggestions
+            SET status = 'rejected'
+            WHERE transaction_id = @transactionId
+              AND status = 'pending';
+            """;
+        command.Parameters.AddWithValue("transactionId", transactionId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task<int> InsertTransactionAsync(
@@ -1028,6 +1455,15 @@ public partial class Program
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    private static string ResolveRulePattern(string? requestedPattern, ReviewTransactionDetails transaction) =>
+        string.IsNullOrWhiteSpace(requestedPattern)
+            ? transaction.NormalizedMerchant ?? transaction.RawDescription
+            : requestedPattern.Trim();
+
+    private static bool IsSupportedMatchType(string? matchType) =>
+        string.IsNullOrWhiteSpace(matchType) ||
+        matchType is "merchant_eq" or "contains" or "regex";
+
     private static void AddNullable(
         NpgsqlCommand command,
         string name,
@@ -1039,6 +1475,35 @@ public partial class Program
         int Imported,
         int Ignored,
         IReadOnlyDictionary<string, int> ByStatus);
+
+    internal sealed record ReviewTransactionItem(
+        int Id,
+        string Date,
+        string? NormalizedMerchant,
+        string RawDescription,
+        decimal Amount,
+        int AccountId,
+        int? CategoryCanonicalId,
+        string? CategoryName,
+        string Currency);
+
+    internal sealed record RuleSuggestionItem(
+        int Id,
+        int TransactionId,
+        string? NormalizedMerchant,
+        string SuggestedPattern,
+        string SuggestedMatchType,
+        int CategoryCanonicalId,
+        string CategoryName,
+        double Confidence);
+
+    internal sealed record CategoryItem(int Id, string Name);
+
+    internal sealed record UpdateTransactionCategoryRequest(
+        int CategoryId,
+        bool CreateRule,
+        string? MatchType,
+        string? Pattern);
 
     internal sealed record DashboardAccountBalance(
         int Id,
@@ -1069,4 +1534,8 @@ public partial class Program
         string? DedupHash,
         int? CategoryCanonicalId,
         int? LlmCorrelationId);
+
+    private sealed record ReviewTransactionDetails(string? NormalizedMerchant, string RawDescription);
+
+    private sealed record PendingRuleSuggestionApproval(string Pattern, string MatchType, int CategoryId);
 }
