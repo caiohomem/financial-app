@@ -128,7 +128,6 @@ app.MapGet(
             report
         });
     });
-
 app.MapPost("/api/imports", async (
     HttpContext context,
     ILlmCategorizationService llmCategorizationService,
@@ -633,7 +632,6 @@ public partial class Program
             topCategories,
             topMerchants);
     }
-
     private static async Task<bool> TransactionExistsAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
