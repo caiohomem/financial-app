@@ -8,6 +8,15 @@ using Npgsql;
 using NpgsqlTypes;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.WithOrigins("http://localhost:3000", "http://127.0.0.1:3000")
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
+});
 builder.Services.Configure<AnomalyDetectionConfig>(
     builder.Configuration.GetSection(AnomalyDetectionConfig.SectionName));
 builder.Services.AddSingleton<AnomalyDetector>();
@@ -31,6 +40,7 @@ var connectionString = builder.Configuration["DATABASE_URL"]
 Program.RunMigrations(connectionString);
 
 var app = builder.Build();
+app.UseCors();
 if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")))
 {
     app.Logger.LogInformation("LLM categorization is disabled because ANTHROPIC_API_KEY is not set.");
@@ -60,6 +70,80 @@ app.MapGet("/api/health", async () =>
             statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 });
+
+app.MapGet(
+    "/api/accounts",
+    async (CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var accounts = await Program.LoadDashboardAccountsAsync(connection, cancellationToken);
+        return Results.Ok(accounts);
+    });
+
+app.MapGet(
+    "/api/spending-by-category",
+    async (string? month, CancellationToken cancellationToken) =>
+    {
+        var resolvedMonth = string.IsNullOrWhiteSpace(month)
+            ? DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM", CultureInfo.InvariantCulture)
+            : month;
+
+        if (!AnomalyDetector.TryParseMonth(resolvedMonth, out _))
+        {
+            return Results.BadRequest(new { error = "Expected month in YYYY-MM format." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var categories = await Program.LoadSpendingByCategoryAsync(connection, resolvedMonth, cancellationToken);
+        return Results.Ok(new
+        {
+            month = resolvedMonth,
+            categories
+        });
+    });
+
+app.MapGet(
+    "/api/transactions",
+    async (
+        string? month,
+        string? account,
+        string? category,
+        string? search,
+        CancellationToken cancellationToken) =>
+    {
+        if (!string.IsNullOrWhiteSpace(month) && !AnomalyDetector.TryParseMonth(month, out _))
+        {
+            return Results.BadRequest(new { error = "Expected month in YYYY-MM format." });
+        }
+
+        int? accountId = null;
+        if (!string.IsNullOrWhiteSpace(account))
+        {
+            if (!int.TryParse(account, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedAccountId))
+            {
+                return Results.BadRequest(new { error = "Expected account to be a numeric id." });
+            }
+
+            accountId = parsedAccountId;
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var transactions = await Program.LoadDashboardTransactionsAsync(
+            connection,
+            month,
+            accountId,
+            category,
+            search,
+            cancellationToken);
+
+        return Results.Ok(transactions);
+    });
 
 app.MapGet(
     "/api/anomalies",
@@ -632,6 +716,172 @@ public partial class Program
             topCategories,
             topMerchants);
     }
+
+    internal static async Task<IReadOnlyList<DashboardAccountBalance>> LoadDashboardAccountsAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var accounts = new List<DashboardAccountBalance>();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                accounts.id,
+                accounts.name,
+                accounts.source,
+                accounts.currency,
+                COALESCE(SUM(CASE WHEN transactions.direction = 'IN' AND transactions.status <> 'cancelled' THEN transactions.amount ELSE 0 END), 0)
+              - COALESCE(SUM(CASE WHEN transactions.direction = 'OUT' AND transactions.status <> 'cancelled' THEN transactions.amount ELSE 0 END), 0)
+                    AS balance
+            FROM accounts
+            LEFT JOIN transactions ON transactions.account_id = accounts.id
+            GROUP BY accounts.id, accounts.name, accounts.source, accounts.currency
+            ORDER BY accounts.name ASC, accounts.id ASC;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            accounts.Add(new DashboardAccountBalance(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetDecimal(4)));
+        }
+
+        return accounts;
+    }
+
+    internal static async Task<IReadOnlyList<DashboardCategorySpend>> LoadSpendingByCategoryAsync(
+        NpgsqlConnection connection,
+        string month,
+        CancellationToken cancellationToken)
+    {
+        var categories = new List<DashboardCategorySpend>();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                COALESCE(categories.name, 'Uncategorized') AS category,
+                COALESCE(SUM(transactions.amount), 0) AS total
+            FROM transactions
+            LEFT JOIN categories ON categories.id = transactions.category_canonical_id
+            WHERE transactions.direction = 'OUT'
+              AND transactions.status <> 'cancelled'
+              AND TO_CHAR(transactions.booking_date, 'YYYY-MM') = @month
+            GROUP BY COALESCE(categories.name, 'Uncategorized')
+            ORDER BY total DESC, category ASC;
+            """;
+        command.Parameters.AddWithValue("month", month);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            categories.Add(new DashboardCategorySpend(
+                reader.GetString(0),
+                reader.GetDecimal(1)));
+        }
+
+        return categories;
+    }
+
+    internal static async Task<IReadOnlyList<DashboardTransactionItem>> LoadDashboardTransactionsAsync(
+        NpgsqlConnection connection,
+        string? month,
+        int? accountId,
+        string? category,
+        string? search,
+        CancellationToken cancellationToken)
+    {
+        var transactions = new List<DashboardTransactionItem>();
+        var conditions = new List<string>();
+
+        await using var command = connection.CreateCommand();
+        var sql = new StringBuilder(
+            """
+            SELECT
+                transactions.id,
+                transactions.booking_date,
+                transactions.normalized_merchant,
+                transactions.raw_description,
+                transactions.amount,
+                transactions.direction,
+                transactions.currency,
+                transactions.status,
+                categories.name AS category_name,
+                accounts.name AS account_name,
+                transactions.source
+            FROM transactions
+            JOIN accounts ON accounts.id = transactions.account_id
+            LEFT JOIN categories ON categories.id = transactions.category_canonical_id
+            """);
+
+        if (!string.IsNullOrWhiteSpace(month))
+        {
+            conditions.Add("TO_CHAR(transactions.booking_date, 'YYYY-MM') = @month");
+            command.Parameters.AddWithValue("month", month);
+        }
+
+        if (accountId is not null)
+        {
+            conditions.Add("transactions.account_id = @accountId");
+            command.Parameters.AddWithValue("accountId", accountId.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            conditions.Add("COALESCE(categories.name, 'Uncategorized') = @category");
+            command.Parameters.AddWithValue("category", category);
+        }
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            conditions.Add("""
+                (
+                    COALESCE(transactions.normalized_merchant, '') ILIKE @search
+                    OR transactions.raw_description ILIKE @search
+                )
+                """);
+            command.Parameters.AddWithValue("search", $"%{search.Trim()}%");
+        }
+
+        if (conditions.Count > 0)
+        {
+            sql.AppendLine();
+            sql.Append("WHERE ");
+            sql.Append(string.Join(" AND ", conditions));
+        }
+
+        sql.AppendLine();
+        sql.Append("""
+            ORDER BY transactions.booking_date DESC, transactions.id DESC;
+            """);
+
+        command.CommandText = sql.ToString();
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var bookingDate = DateOnly.FromDateTime(reader.GetDateTime(1));
+            var normalizedMerchant = reader.IsDBNull(2) ? null : reader.GetString(2);
+            transactions.Add(new DashboardTransactionItem(
+                reader.GetInt32(0),
+                bookingDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                string.IsNullOrWhiteSpace(normalizedMerchant) ? reader.GetString(3) : normalizedMerchant,
+                reader.GetString(3),
+                reader.GetDecimal(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.IsDBNull(8) ? "Uncategorized" : reader.GetString(8),
+                reader.GetString(9),
+                reader.GetString(10)));
+        }
+
+        return transactions;
+    }
+
     private static async Task<bool> TransactionExistsAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
@@ -789,6 +1039,30 @@ public partial class Program
         int Imported,
         int Ignored,
         IReadOnlyDictionary<string, int> ByStatus);
+
+    internal sealed record DashboardAccountBalance(
+        int Id,
+        string Name,
+        string Source,
+        string Currency,
+        decimal Balance);
+
+    internal sealed record DashboardCategorySpend(
+        string Category,
+        decimal Total);
+
+    internal sealed record DashboardTransactionItem(
+        int Id,
+        string BookingDate,
+        string NormalizedMerchant,
+        string RawDescription,
+        decimal Amount,
+        string Direction,
+        string Currency,
+        string Status,
+        string Category,
+        string AccountName,
+        string Source);
 
     private sealed record TransactionInsertCandidate(
         ParsedTransaction Transaction,
