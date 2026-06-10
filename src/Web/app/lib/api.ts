@@ -16,6 +16,46 @@ export type SpendingByCategoryResponse = {
   categories: CategorySpend[];
 };
 
+export type MonthlyCategorySummary = {
+  name: string;
+  totalOut: number;
+  count: number;
+};
+
+export type MonthlyMerchantSummary = {
+  name: string;
+  totalOut: number;
+  count: number;
+};
+
+export type MonthlyAggregations = {
+  month: string;
+  totalOut: number;
+  totalIn: number;
+  transactionCount: number;
+  priorMonthTotalOut: number | null;
+  topCategories: MonthlyCategorySummary[];
+  topMerchants: MonthlyMerchantSummary[];
+};
+
+export type MonthlyAnomaly = {
+  transactionId: number;
+  normalizedMerchant: string | null;
+  rawDescription: string;
+  amount: number;
+  direction: "IN" | "OUT";
+  category: string | null;
+  bookingDate: string;
+  deviationFactor: number;
+};
+
+export type MonthlyReport = {
+  month: string;
+  aggregations: MonthlyAggregations;
+  anomalies: MonthlyAnomaly[];
+  report: string | null;
+};
+
 export type DashboardTransaction = {
   id: number;
   bookingDate: string;
@@ -112,6 +152,11 @@ export function getAccounts() {
 export function getSpendingByCategory(month: string) {
   const query = new URLSearchParams({ month });
   return apiFetch<SpendingByCategoryResponse>(`/api/spending-by-category?${query.toString()}`);
+}
+
+export function getMonthlyReport(month: string) {
+  const query = new URLSearchParams({ month });
+  return apiFetch<MonthlyReport>(`/api/reports/monthly?${query.toString()}`);
 }
 
 export function getTransactions(filters: TransactionFilters = {}) {

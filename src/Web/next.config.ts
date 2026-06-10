@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+// Server-side rewrite target. In Docker Compose use the internal service URL (http://api:8080).
+const apiBaseUrl =
+  process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
 const nextConfig: NextConfig = {
   async rewrites() {
