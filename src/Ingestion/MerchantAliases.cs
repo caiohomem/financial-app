@@ -7,6 +7,7 @@ public static class MerchantAliases
         {
             ["UBER EATS"] = "Uber Eats",
             ["HELP.UBER.COM"] = "Uber Eats",
+            ["HELP.UBER.COMNL"] = "Uber Eats",
             ["GLOVO"] = "Glovo",
             ["ENDESA"] = "Endesa",
             ["NOS COMUNICACOES"] = "NOS Comunicacoes"

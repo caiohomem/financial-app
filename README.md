@@ -20,6 +20,7 @@ docker compose up --build
 - `.env` esta ignorado no git e nao deve ser commitado.
 - Os dados do Postgres persistem no volume `postgres_data`.
 - O frontend inicial carrega uma pagina vazia por design nesta fase.
+- Quando a categorizacao por IA estiver ativa, apenas `normalized_merchant` e `raw_description` de transacoes nao-categorizadas sao enviados para a API do Claude; nenhum outro dado da conta ou do utilizador sai da aplicacao.
 
 ## Deteccao de anomalias
 

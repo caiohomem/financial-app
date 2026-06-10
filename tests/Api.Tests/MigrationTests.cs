@@ -25,6 +25,7 @@ public class MigrationTests
 
         await AssertRelationExists(connection, "transactions");
         await AssertRelationExists(connection, "import_batches");
+        await AssertRelationExists(connection, "rule_suggestions");
         await AssertRelationExists(connection, "idx_transactions_source_source_transaction_id");
         await AssertRelationExists(connection, "idx_transactions_dedup_hash");
 

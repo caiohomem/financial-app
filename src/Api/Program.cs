@@ -8,6 +8,10 @@ using Npgsql;
 using NpgsqlTypes;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddHttpClient<ILlmCategorizationService, LlmCategorizationService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.anthropic.com/");
+});
 builder.Services.Configure<AnomalyDetectionConfig>(
     builder.Configuration.GetSection(AnomalyDetectionConfig.SectionName));
 builder.Services.AddSingleton<AnomalyDetector>();
@@ -23,6 +27,11 @@ var connectionString = builder.Configuration["DATABASE_URL"]
 Program.RunMigrations(connectionString);
 
 var app = builder.Build();
+if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")))
+{
+    app.Logger.LogInformation("LLM categorization is disabled because ANTHROPIC_API_KEY is not set.");
+}
+
 var parserRegistry = new ParserRegistry();
 parserRegistry.Register(".csv", new WiseCsvParser());
 parserRegistry.Register(".pdf", new ActivoBankPdfParser());
@@ -81,7 +90,10 @@ app.MapGet(
         });
     });
 
-app.MapPost("/api/imports", async (HttpContext context) =>
+app.MapPost("/api/imports", async (
+    HttpContext context,
+    ILlmCategorizationService llmCategorizationService,
+    IConfiguration configuration) =>
 {
     if (!context.Request.HasFormContentType)
     {
@@ -156,7 +168,10 @@ app.MapPost("/api/imports", async (HttpContext context) =>
         source,
         accountId,
         batchId,
-        parsed.Transactions);
+        parsed.Transactions,
+        llmCategorizationService,
+        configuration.GetValue<double?>("Categorization:ConfidenceThreshold") ?? 0.85d,
+        context.RequestAborted);
 
     await transaction.CommitAsync();
 
@@ -244,16 +259,40 @@ public partial class Program
         string source,
         int accountId,
         int batchId,
-        IReadOnlyList<ParsedTransaction> transactions)
+        IReadOnlyList<ParsedTransaction> transactions,
+        ILlmCategorizationService llmCategorizationService,
+        double confidenceThreshold,
+        CancellationToken cancellationToken = default)
     {
         var imported = 0;
         var ignored = 0;
         var byStatus = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var evaluator = await CategoryEvaluator.LoadAsync(connection, transaction);
+        var canonicalCategories = await LoadCanonicalCategoriesAsync(connection, transaction, cancellationToken);
+        var inserts = new List<TransactionInsertCandidate>();
+        var pendingLlmInputs = new List<LlmCategorizationInput>();
+        var seenWiseTransactionIds = new HashSet<string>(StringComparer.Ordinal);
+        var seenDedupHashes = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var item in transactions)
         {
             var dedupHash = source == "activobank" ? ComputeDedupHash(accountId, item) : null;
+            if (source == "wise")
+            {
+                var sourceTransactionId = item.SourceTransactionId
+                    ?? throw new InvalidDataException("Wise transaction is missing its source transaction id.");
+                if (!seenWiseTransactionIds.Add(sourceTransactionId))
+                {
+                    ignored++;
+                    continue;
+                }
+            }
+            else if (!seenDedupHashes.Add(dedupHash!))
+            {
+                ignored++;
+                continue;
+            }
+
             if (await TransactionExistsAsync(connection, transaction, source, item, dedupHash))
             {
                 ignored++;
@@ -264,17 +303,72 @@ public partial class Program
                 item.CategorySource,
                 item.NormalizedMerchant,
                 item.RawDescription);
-            await InsertTransactionAsync(
+
+            var llmCorrelationId = categoryCanonicalId is null ? inserts.Count : (int?)null;
+            if (llmCorrelationId is not null)
+            {
+                pendingLlmInputs.Add(new LlmCategorizationInput(
+                    llmCorrelationId.Value,
+                    item.NormalizedMerchant,
+                    item.RawDescription));
+            }
+
+            inserts.Add(new TransactionInsertCandidate(
+                item,
+                dedupHash,
+                categoryCanonicalId,
+                llmCorrelationId));
+        }
+
+        var llmResults = pendingLlmInputs.Count == 0
+            ? new Dictionary<int, LlmCategorizationResult>()
+            : new Dictionary<int, LlmCategorizationResult>(
+                await llmCategorizationService.CategorizeAsync(
+                    pendingLlmInputs,
+                    canonicalCategories.Keys.OrderBy(name => name, StringComparer.Ordinal).ToArray(),
+                    cancellationToken));
+
+        foreach (var insert in inserts)
+        {
+            var categoryCanonicalId = insert.CategoryCanonicalId;
+            LlmCategorizationResult? llmResult = null;
+            if (insert.LlmCorrelationId is not null &&
+                llmResults.TryGetValue(insert.LlmCorrelationId.Value, out var resolved))
+            {
+                llmResult = resolved;
+                if (resolved.Confidence >= confidenceThreshold &&
+                    canonicalCategories.TryGetValue(resolved.Category, out var resolvedCategoryId))
+                {
+                    categoryCanonicalId = resolvedCategoryId;
+                }
+            }
+
+            var transactionId = await InsertTransactionAsync(
                 connection,
                 transaction,
                 source,
                 accountId,
                 batchId,
-                item,
-                dedupHash,
+                insert.Transaction,
+                insert.DedupHash,
                 categoryCanonicalId);
+
+            if (llmResult?.Suggestion is not null &&
+                llmResult.Confidence < confidenceThreshold &&
+                canonicalCategories.TryGetValue(llmResult.Category, out var suggestionCategoryId))
+            {
+                await InsertRuleSuggestionAsync(
+                    connection,
+                    transaction,
+                    transactionId,
+                    llmResult.Suggestion,
+                    suggestionCategoryId,
+                    llmResult.Confidence,
+                    cancellationToken);
+            }
+
             imported++;
-            byStatus[item.Status] = byStatus.GetValueOrDefault(item.Status) + 1;
+            byStatus[insert.Transaction.Status] = byStatus.GetValueOrDefault(insert.Transaction.Status) + 1;
         }
 
         return new ImportSummary(imported, ignored, byStatus);
@@ -406,7 +500,7 @@ public partial class Program
         return (bool)(await command.ExecuteScalarAsync())!;
     }
 
-    private static async Task InsertTransactionAsync(
+    private static async Task<int> InsertTransactionAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         string source,
@@ -428,7 +522,8 @@ public partial class Program
                 @accountId, @source, @sourceTransactionId, @bookingDate, @valueDate,
                 @rawDescription, @normalizedMerchant, @amount, @direction, @currency,
                 @runningBalance, @status, @categoryCanonicalId, @categorySource, @batchId, @dedupHash
-            );
+            )
+            RETURNING id;
             """;
         command.Parameters.AddWithValue("accountId", accountId);
         command.Parameters.AddWithValue("source", source);
@@ -447,7 +542,67 @@ public partial class Program
         command.Parameters.AddWithValue("batchId", batchId);
         AddNullable(command, "dedupHash", NpgsqlDbType.Text, dedupHash);
 
-        await command.ExecuteNonQueryAsync();
+        return (int)(await command.ExecuteScalarAsync())!;
+    }
+
+    private static async Task<Dictionary<string, int>> LoadCanonicalCategoriesAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        var categories = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT name, id
+            FROM categories
+            ORDER BY name ASC;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            categories[reader.GetString(0)] = reader.GetInt32(1);
+        }
+
+        return categories;
+    }
+
+    private static async Task InsertRuleSuggestionAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int transactionId,
+        LlmRuleSuggestion suggestion,
+        int categoryCanonicalId,
+        double confidence,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO rule_suggestions (
+                transaction_id,
+                suggested_pattern,
+                suggested_match_type,
+                category_canonical_id,
+                confidence
+            )
+            VALUES (
+                @transactionId,
+                @suggestedPattern,
+                @suggestedMatchType,
+                @categoryCanonicalId,
+                @confidence
+            );
+            """;
+        command.Parameters.AddWithValue("transactionId", transactionId);
+        command.Parameters.AddWithValue("suggestedPattern", suggestion.Pattern);
+        command.Parameters.AddWithValue("suggestedMatchType", suggestion.MatchType);
+        command.Parameters.AddWithValue("categoryCanonicalId", categoryCanonicalId);
+        command.Parameters.AddWithValue("confidence", confidence);
+
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static void AddNullable(
@@ -461,4 +616,10 @@ public partial class Program
         int Imported,
         int Ignored,
         IReadOnlyDictionary<string, int> ByStatus);
+
+    private sealed record TransactionInsertCandidate(
+        ParsedTransaction Transaction,
+        string? DedupHash,
+        int? CategoryCanonicalId,
+        int? LlmCorrelationId);
 }
