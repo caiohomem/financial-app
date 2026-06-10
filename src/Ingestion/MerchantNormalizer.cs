@@ -39,7 +39,7 @@ public static partial class MerchantNormalizer
     private static partial Regex PrefixRegex();
 
     [GeneratedRegex(
-        @"(?:\s+|(?<=\p{L}))(?:" + CountrySuffixPattern + "|" + CitySuffixPattern + @")$",
+        @"\s+(?:" + CountrySuffixPattern + "|" + CitySuffixPattern + @")$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SuffixRegex();
 
