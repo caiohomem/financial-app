@@ -74,7 +74,7 @@ public class AnomalyEndpointTests
         await using var connection = new NpgsqlConnection(databaseUrl);
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = "TRUNCATE transactions, accounts, import_batches RESTART IDENTITY CASCADE;";
+        command.CommandText = "TRUNCATE rule_suggestions, transactions, accounts, import_batches RESTART IDENTITY CASCADE;";
         await command.ExecuteNonQueryAsync();
     }
 

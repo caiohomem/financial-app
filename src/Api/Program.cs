@@ -8,16 +8,20 @@ using Npgsql;
 using NpgsqlTypes;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddHttpClient<ILlmCategorizationService, LlmCategorizationService>(client =>
-{
-    client.BaseAddress = new Uri("https://api.anthropic.com/");
-});
 builder.Services.Configure<AnomalyDetectionConfig>(
     builder.Configuration.GetSection(AnomalyDetectionConfig.SectionName));
 builder.Services.AddSingleton<AnomalyDetector>();
 builder.Services.AddHttpClient<AnomalyExplainer>(client =>
 {
-    client.BaseAddress = new Uri("https://api.anthropic.com");
+    client.BaseAddress = new Uri("https://api.anthropic.com/");
+});
+builder.Services.AddHttpClient<ILlmCategorizationService, LlmCategorizationService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.anthropic.com/");
+});
+builder.Services.AddHttpClient<IMonthlyReportService, MonthlyReportService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.anthropic.com/");
 });
 
 var connectionString = builder.Configuration["DATABASE_URL"]
@@ -90,6 +94,40 @@ app.MapGet(
         });
     });
 
+app.MapGet(
+    "/api/reports/monthly",
+    async (
+        string? month,
+        IMonthlyReportService reportService,
+        IOptions<AnomalyDetectionConfig> anomalyConfig,
+        AnomalyDetector anomalyDetector,
+        CancellationToken cancellationToken) =>
+    {
+        var resolvedMonth = string.IsNullOrWhiteSpace(month)
+            ? DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM", CultureInfo.InvariantCulture)
+            : month;
+
+        if (!AnomalyDetector.TryParseMonth(resolvedMonth, out _))
+        {
+            return Results.BadRequest(new { error = "Expected month in YYYY-MM format." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var aggregations = await Program.LoadMonthlyAggregationsAsync(connection, resolvedMonth, cancellationToken);
+        var allTransactions = await Program.LoadTransactionsAsync(connection, cancellationToken);
+        var anomalies = anomalyDetector.Detect(allTransactions, resolvedMonth, anomalyConfig.Value);
+        var report = await reportService.GenerateReportAsync(aggregations, anomalies, cancellationToken);
+
+        return Results.Ok(new
+        {
+            month = resolvedMonth,
+            aggregations,
+            anomalies,
+            report
+        });
+    });
 app.MapPost("/api/imports", async (
     HttpContext context,
     ILlmCategorizationService llmCategorizationService,
@@ -459,6 +497,141 @@ public partial class Program
         return await Task.WhenAll(tasks);
     }
 
+    internal static async Task<MonthlyAggregations> LoadMonthlyAggregationsAsync(
+        NpgsqlConnection connection,
+        string month,
+        CancellationToken cancellationToken)
+    {
+        if (!AnomalyDetector.TryParseMonth(month, out var monthStart))
+        {
+            throw new ArgumentException("Expected month in YYYY-MM format.", nameof(month));
+        }
+
+        var currentFrom = monthStart.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+        var currentTo = monthStart.AddMonths(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+        var priorFrom = monthStart.AddMonths(-1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+
+        decimal totalOut = 0m;
+        decimal totalIn = 0m;
+        var transactionCount = 0;
+        decimal? priorMonthTotalOut = null;
+
+        await using (var totalsCommand = connection.CreateCommand())
+        {
+            totalsCommand.CommandText = """
+                SELECT
+                    direction,
+                    COALESCE(SUM(amount) FILTER (
+                        WHERE booking_date >= @currentFrom AND booking_date < @currentTo
+                    ), 0) AS current_total,
+                    COALESCE(SUM(amount) FILTER (
+                        WHERE booking_date >= @priorFrom AND booking_date < @currentFrom
+                    ), 0) AS prior_total,
+                    COUNT(*) FILTER (
+                        WHERE booking_date >= @currentFrom AND booking_date < @currentTo
+                    ) AS current_count
+                FROM transactions
+                WHERE status <> 'cancelled'
+                  AND booking_date >= @priorFrom
+                  AND booking_date < @currentTo
+                GROUP BY direction;
+                """;
+            totalsCommand.Parameters.AddWithValue("currentFrom", currentFrom);
+            totalsCommand.Parameters.AddWithValue("currentTo", currentTo);
+            totalsCommand.Parameters.AddWithValue("priorFrom", priorFrom);
+
+            await using var reader = await totalsCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var direction = reader.GetString(0);
+                var currentTotal = reader.GetDecimal(1);
+                var priorTotal = reader.GetDecimal(2);
+                var currentCount = reader.GetInt64(3);
+
+                if (string.Equals(direction, "OUT", StringComparison.OrdinalIgnoreCase))
+                {
+                    totalOut = currentTotal;
+                    priorMonthTotalOut = priorTotal;
+                }
+                else if (string.Equals(direction, "IN", StringComparison.OrdinalIgnoreCase))
+                {
+                    totalIn = currentTotal;
+                }
+
+                transactionCount += Convert.ToInt32(currentCount, CultureInfo.InvariantCulture);
+            }
+        }
+
+        var topCategories = new List<MonthlyCategorySummary>();
+        await using (var categoriesCommand = connection.CreateCommand())
+        {
+            categoriesCommand.CommandText = """
+                SELECT
+                    COALESCE(categories.name, 'Sem categoria') AS name,
+                    COALESCE(SUM(transactions.amount), 0) AS total_out,
+                    COUNT(*) AS item_count
+                FROM transactions
+                LEFT JOIN categories ON categories.id = transactions.category_canonical_id
+                WHERE transactions.status <> 'cancelled'
+                  AND transactions.direction = 'OUT'
+                  AND transactions.booking_date >= @currentFrom
+                  AND transactions.booking_date < @currentTo
+                GROUP BY COALESCE(categories.name, 'Sem categoria')
+                ORDER BY total_out DESC, name ASC
+                LIMIT 5;
+                """;
+            categoriesCommand.Parameters.AddWithValue("currentFrom", currentFrom);
+            categoriesCommand.Parameters.AddWithValue("currentTo", currentTo);
+
+            await using var reader = await categoriesCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                topCategories.Add(new MonthlyCategorySummary(
+                    reader.GetString(0),
+                    reader.GetDecimal(1),
+                    Convert.ToInt32(reader.GetInt64(2), CultureInfo.InvariantCulture)));
+            }
+        }
+
+        var topMerchants = new List<MonthlyMerchantSummary>();
+        await using (var merchantsCommand = connection.CreateCommand())
+        {
+            merchantsCommand.CommandText = """
+                SELECT
+                    COALESCE(NULLIF(normalized_merchant, ''), raw_description) AS merchant_name,
+                    COALESCE(SUM(amount), 0) AS total_out,
+                    COUNT(*) AS item_count
+                FROM transactions
+                WHERE status <> 'cancelled'
+                  AND direction = 'OUT'
+                  AND booking_date >= @currentFrom
+                  AND booking_date < @currentTo
+                GROUP BY COALESCE(NULLIF(normalized_merchant, ''), raw_description)
+                ORDER BY total_out DESC, merchant_name ASC
+                LIMIT 5;
+                """;
+            merchantsCommand.Parameters.AddWithValue("currentFrom", currentFrom);
+            merchantsCommand.Parameters.AddWithValue("currentTo", currentTo);
+
+            await using var reader = await merchantsCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                topMerchants.Add(new MonthlyMerchantSummary(
+                    reader.GetString(0),
+                    reader.GetDecimal(1),
+                    Convert.ToInt32(reader.GetInt64(2), CultureInfo.InvariantCulture)));
+            }
+        }
+
+        return new MonthlyAggregations(
+            month,
+            totalOut,
+            totalIn,
+            transactionCount,
+            priorMonthTotalOut,
+            topCategories,
+            topMerchants);
+    }
     private static async Task<bool> TransactionExistsAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
