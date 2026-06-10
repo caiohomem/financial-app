@@ -21,7 +21,8 @@ services:
 
   api:
     build:
-      context: ./src/Api
+      context: ./src
+      dockerfile: Api/Dockerfile
     restart: unless-stopped
     env_file:
       - .env
