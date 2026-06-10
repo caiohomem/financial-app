@@ -2,6 +2,9 @@ using System.Net;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
 using Xunit;
 
@@ -126,6 +129,143 @@ public class ImportEndpointTests
     }
 
     [Fact]
+    public async Task Import_AutoAppliesLlmCategory_WhenConfidenceMeetsDefaultThreshold()
+    {
+        var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
+        if (string.IsNullOrWhiteSpace(databaseUrl))
+        {
+            return;
+        }
+
+        using var scope = new DatabaseUrlScope(databaseUrl);
+        await using var factory = new ApiFactory(
+            new StubLlmCategorizationService((transactions, _) => new Dictionary<int, LlmCategorizationResult>
+            {
+                [transactions[0].TransactionId] = new(
+                    transactions[0].TransactionId,
+                    "Restaurantes",
+                    0.90,
+                    null)
+            }));
+        using var client = factory.CreateClient();
+        await CleanImportData(databaseUrl);
+
+        var response = await UploadWiseCsv(
+            client,
+            transferNumber: "llm-auto-apply",
+            beneficiaryName: "Coffee Lab Lisbon");
+
+        Assert.Equal(1, response.Imported);
+
+        await using var connection = new NpgsqlConnection(databaseUrl);
+        await connection.OpenAsync();
+
+        Assert.Equal(1, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM transactions
+            JOIN categories ON categories.id = transactions.category_canonical_id
+            WHERE transactions.source = 'wise'
+              AND transactions.source_transaction_id = 'llm-auto-apply'
+              AND categories.name = 'Restaurantes';
+            """));
+        Assert.Equal(0, await ScalarInt(connection, "SELECT count(*) FROM rule_suggestions;"));
+    }
+
+    [Fact]
+    public async Task Import_LeavesTransactionForReview_WhenConfidenceIsBelowConfiguredThreshold()
+    {
+        var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
+        if (string.IsNullOrWhiteSpace(databaseUrl))
+        {
+            return;
+        }
+
+        using var scope = new DatabaseUrlScope(databaseUrl);
+        await using var factory = new ApiFactory(
+            new StubLlmCategorizationService((transactions, _) => new Dictionary<int, LlmCategorizationResult>
+            {
+                [transactions[0].TransactionId] = new(
+                    transactions[0].TransactionId,
+                    "Restaurantes",
+                    0.80,
+                    new LlmRuleSuggestion("Coffee Lab", "merchant_eq"))
+            }));
+        using var client = factory.CreateClient();
+        await CleanImportData(databaseUrl);
+
+        var response = await UploadWiseCsv(
+            client,
+            transferNumber: "llm-review",
+            beneficiaryName: "Coffee Lab Lisbon");
+
+        Assert.Equal(1, response.Imported);
+
+        await using var connection = new NpgsqlConnection(databaseUrl);
+        await connection.OpenAsync();
+
+        Assert.Equal(1, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM transactions
+            WHERE source = 'wise'
+              AND source_transaction_id = 'llm-review'
+              AND category_canonical_id IS NULL;
+            """));
+        Assert.Equal(1, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM rule_suggestions suggestions
+            JOIN transactions ON transactions.id = suggestions.transaction_id
+            JOIN categories ON categories.id = suggestions.category_canonical_id
+            WHERE transactions.source_transaction_id = 'llm-review'
+              AND suggestions.status = 'pending'
+              AND suggestions.suggested_pattern = 'Coffee Lab'
+              AND suggestions.suggested_match_type = 'merchant_eq'
+              AND categories.name = 'Restaurantes';
+            """));
+    }
+
+    [Fact]
+    public async Task Import_DegradesGracefully_WhenLlmServiceReturnsNoResult()
+    {
+        var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
+        if (string.IsNullOrWhiteSpace(databaseUrl))
+        {
+            return;
+        }
+
+        using var scope = new DatabaseUrlScope(databaseUrl);
+        await using var factory = new ApiFactory(
+            new StubLlmCategorizationService((_, _) => new Dictionary<int, LlmCategorizationResult>()));
+        using var client = factory.CreateClient();
+        await CleanImportData(databaseUrl);
+
+        var response = await UploadWiseCsv(
+            client,
+            transferNumber: "llm-null",
+            beneficiaryName: "Coffee Lab Lisbon");
+
+        Assert.Equal(1, response.Imported);
+
+        await using var connection = new NpgsqlConnection(databaseUrl);
+        await connection.OpenAsync();
+
+        Assert.Equal(1, await ScalarInt(
+            connection,
+            """
+            SELECT count(*)
+            FROM transactions
+            WHERE source = 'wise'
+              AND source_transaction_id = 'llm-null'
+              AND category_canonical_id IS NULL;
+            """));
+    }
+
+    [Fact]
     public void ActivoBankDedupHash_ChangesWithRunningBalanceAndRawDescription()
     {
         var transaction = new Ingestion.ParsedTransaction(
@@ -164,14 +304,33 @@ public class ImportEndpointTests
         return (await response.Content.ReadFromJsonAsync<ImportResponse>())!;
     }
 
+    private static async Task<ImportResponse> UploadWiseCsv(
+        HttpClient client,
+        string transferNumber,
+        string beneficiaryName)
+    {
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(BuildWiseCsv(transferNumber, beneficiaryName)), "file", "llm.csv");
+
+        var response = await client.PostAsync("/api/imports", content);
+        response.EnsureSuccessStatusCode();
+        return (await response.Content.ReadFromJsonAsync<ImportResponse>())!;
+    }
+
     private static async Task CleanImportData(string databaseUrl)
     {
         await using var connection = new NpgsqlConnection(databaseUrl);
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = "TRUNCATE transactions, accounts, import_batches RESTART IDENTITY CASCADE;";
+        command.CommandText = "TRUNCATE rule_suggestions, transactions, accounts, import_batches RESTART IDENTITY CASCADE;";
         await command.ExecuteNonQueryAsync();
     }
+
+    private static string BuildWiseCsv(string transferNumber, string beneficiaryName) =>
+        string.Join(
+            Environment.NewLine,
+            "Número da transferência,Situação,Direção,Criada em,Concluída em,Nome de origem,Valor de origem (tarifas inclusas),Moeda de origem,Nome do beneficiário,Referência,Criada por,Categoria,Mensagem",
+            $"{transferNumber},COMPLETED,OUT,2026-06-09 09:00:00,2026-06-09 09:00:00,Conta Wise,12.34,EUR,{beneficiaryName},Cafe,Main Account,,,");
 
     private static async Task<int> ScalarInt(NpgsqlConnection connection, string sql)
     {
@@ -182,9 +341,29 @@ public class ImportEndpointTests
 
     private sealed record ImportResponse(int Imported, int Ignored);
 
-    private sealed class ApiFactory : WebApplicationFactory<Program>
+    private sealed class ApiFactory(
+        ILlmCategorizationService? llmCategorizationService = null,
+        IReadOnlyDictionary<string, string?>? configurationOverrides = null) : WebApplicationFactory<Program>
     {
-        protected override void ConfigureWebHost(IWebHostBuilder builder) { }
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            if (configurationOverrides is not null)
+            {
+                builder.ConfigureAppConfiguration((_, config) =>
+                {
+                    config.AddInMemoryCollection(configurationOverrides);
+                });
+            }
+
+            if (llmCategorizationService is not null)
+            {
+                builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<ILlmCategorizationService>();
+                    services.AddSingleton(llmCategorizationService);
+                });
+            }
+        }
     }
 
     private sealed class DatabaseUrlScope : IDisposable
@@ -196,5 +375,16 @@ public class ImportEndpointTests
 
         public void Dispose() =>
             Environment.SetEnvironmentVariable("DATABASE_URL", _previousValue);
+    }
+
+    private sealed class StubLlmCategorizationService(
+        Func<IReadOnlyList<LlmCategorizationInput>, IReadOnlyList<string>, IReadOnlyDictionary<int, LlmCategorizationResult>> handler)
+        : ILlmCategorizationService
+    {
+        public Task<IReadOnlyDictionary<int, LlmCategorizationResult>> CategorizeAsync(
+            IReadOnlyList<LlmCategorizationInput> transactions,
+            IReadOnlyList<string> canonicalCategories,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(handler(transactions, canonicalCategories));
     }
 }
