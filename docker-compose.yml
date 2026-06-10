@@ -46,14 +46,13 @@ services:
     build:
       context: ./src/Web
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+        API_URL: http://api:8080
     restart: unless-stopped
     env_file:
       - .env
     environment:
       PORT: 3000
       HOSTNAME: 0.0.0.0
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:

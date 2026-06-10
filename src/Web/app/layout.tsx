@@ -27,6 +27,9 @@ export default function RootLayout({ children }: RootLayoutProps) {
               <Link href="/" className={styles.navLink}>
                 Dashboard
               </Link>
+              <Link href="/report" className={styles.navLink}>
+                Relatorio
+              </Link>
               <Link href="/review" className={styles.navLink}>
                 Review
               </Link>
