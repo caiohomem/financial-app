@@ -20,3 +20,16 @@ docker compose up --build
 - `.env` esta ignorado no git e nao deve ser commitado.
 - Os dados do Postgres persistem no volume `postgres_data`.
 - O frontend inicial carrega uma pagina vazia por design nesta fase.
+
+## Deteccao de anomalias
+
+O endpoint `GET /api/anomalies?month=YYYY-MM` usa um metodo hibrido simples e configuravel: primeiro remove movimentos recorrentes do mesmo mercador com valores semelhantes ao longo do historico importado, depois sinaliza apenas os restantes que fiquem muito acima do baseline da categoria. Esta abordagem foi escolhida porque com apenas 1-2 meses de historico um filtro por recorrencia evita falsos positivos nos pagamentos mensais grandes, enquanto o teste de magnitude continua a apanhar gastos pontuais fora do padrao.
+
+| Parametro | Default | Descricao |
+|---|---:|---|
+| `RecurrenceMinMonths` | `2` | Numero minimo de meses distintos em que um mercador com valor semelhante tem de aparecer para ser tratado como recorrente. |
+| `RecurrenceTolerancePct` | `0.05` | Tolerancia percentual usada para considerar dois valores do mesmo mercador como equivalentes. |
+| `MagnitudeMultiplier` | `2.0` | Multiplicador aplicado a mediana historica da categoria antes de comparar o valor atual. |
+| `AbsoluteFloor` | `300.0` | Piso absoluto que impede micro-transacoes de serem sinalizadas como anomalias. |
+| `MinHistoryMonths` | `2` | Numero minimo de meses importados para ativar o modo normal com filtro de recorrencia. |
+| `ColdStartAbsoluteThreshold` | `2000.0` | Limite absoluto usado em cold start, quando ainda nao existe historico suficiente. |

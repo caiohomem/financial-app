@@ -3,10 +3,19 @@ using System.Security.Cryptography;
 using System.Text;
 using DbUp;
 using Ingestion;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.Configure<AnomalyDetectionConfig>(
+    builder.Configuration.GetSection(AnomalyDetectionConfig.SectionName));
+builder.Services.AddSingleton<AnomalyDetector>();
+builder.Services.AddHttpClient<AnomalyExplainer>(client =>
+{
+    client.BaseAddress = new Uri("https://api.anthropic.com");
+});
+
 var connectionString = builder.Configuration["DATABASE_URL"]
     ?? throw new InvalidOperationException(
         "Required configuration 'DATABASE_URL' is missing. Set the DATABASE_URL environment variable before starting the application.");
@@ -38,6 +47,39 @@ app.MapGet("/api/health", async () =>
             statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 });
+
+app.MapGet(
+    "/api/anomalies",
+    async (
+        string? month,
+        IOptions<AnomalyDetectionConfig> configOptions,
+        AnomalyDetector detector,
+        AnomalyExplainer explainer,
+        CancellationToken cancellationToken) =>
+    {
+        var resolvedMonth = string.IsNullOrWhiteSpace(month)
+            ? DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM", CultureInfo.InvariantCulture)
+            : month;
+
+        if (!AnomalyDetector.TryParseMonth(resolvedMonth, out _))
+        {
+            return Results.BadRequest(new { error = "Expected month in YYYY-MM format." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var allTransactions = await Program.LoadTransactionsAsync(connection, cancellationToken);
+        var anomalies = detector.Detect(allTransactions, resolvedMonth, configOptions.Value);
+        var anomalyPayload = await Program.BuildAnomalyPayloadAsync(anomalies, explainer, cancellationToken);
+
+        return Results.Ok(new
+        {
+            month = resolvedMonth,
+            detectionMethod = AnomalyDetector.DetectionMethod,
+            anomalies = anomalyPayload
+        });
+    });
 
 app.MapPost("/api/imports", async (HttpContext context) =>
 {
@@ -250,6 +292,77 @@ public partial class Program
             transaction.RawDescription);
 
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)));
+    }
+
+    internal static async Task<IReadOnlyList<AnomalyDetector.TransactionRow>> LoadTransactionsAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var rows = new List<AnomalyDetector.TransactionRow>();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                transactions.id,
+                transactions.raw_description,
+                transactions.normalized_merchant,
+                transactions.amount,
+                transactions.direction,
+                categories.name,
+                transactions.booking_date
+            FROM transactions
+            LEFT JOIN categories ON categories.id = transactions.category_canonical_id
+            ORDER BY transactions.booking_date ASC, transactions.id ASC;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new AnomalyDetector.TransactionRow(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetDecimal(3),
+                reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                DateOnly.FromDateTime(reader.GetDateTime(6))));
+        }
+
+        return rows;
+    }
+
+    internal static async Task<IReadOnlyList<object?>> BuildAnomalyPayloadAsync(
+        IReadOnlyList<AnomalyDetector.AnomalyResult> anomalies,
+        AnomalyExplainer explainer,
+        CancellationToken cancellationToken)
+    {
+        var throttler = new SemaphoreSlim(5);
+        var tasks = anomalies.Select(async anomaly =>
+        {
+            await throttler.WaitAsync(cancellationToken);
+            try
+            {
+                var explanation = await explainer.ExplainAsync(anomaly, cancellationToken);
+                return (object?)new
+                {
+                    transactionId = anomaly.TransactionId,
+                    normalizedMerchant = anomaly.NormalizedMerchant,
+                    rawDescription = anomaly.RawDescription,
+                    amount = anomaly.Amount,
+                    direction = anomaly.Direction,
+                    category = anomaly.Category,
+                    bookingDate = anomaly.BookingDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    deviationFactor = Math.Round(anomaly.DeviationFactor, 2),
+                    explanation
+                };
+            }
+            finally
+            {
+                throttler.Release();
+            }
+        });
+
+        return await Task.WhenAll(tasks);
     }
 
     private static async Task<bool> TransactionExistsAsync(
