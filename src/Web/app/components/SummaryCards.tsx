@@ -1,4 +1,5 @@
 import styles from "../dashboard.module.css";
+import { formatCurrency } from "../lib/format";
 import type { AccountBalance } from "../lib/api";
 
 type SummaryCardsProps = {
@@ -49,10 +50,3 @@ export function SummaryCards({ accounts, totalSpent, monthLabel }: SummaryCardsP
   );
 }
 
-function formatCurrency(value: number, currency: string) {
-  return new Intl.NumberFormat("pt-PT", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 2,
-  }).format(value);
-}

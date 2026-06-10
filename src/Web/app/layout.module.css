@@ -48,3 +48,9 @@
   background: rgba(212, 161, 81, 0.14);
   transform: translateY(-1px);
 }
+
+.navLinkActive {
+  color: var(--ink-strong);
+  background: rgba(31, 95, 85, 0.12);
+  font-weight: 600;
+}

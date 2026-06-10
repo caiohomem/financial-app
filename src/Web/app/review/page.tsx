@@ -118,9 +118,9 @@ export default function ReviewPage() {
             <div className={styles.panelBody}>
               <div className={styles.sectionHeader}>
                 <div>
-                  <h2 className={styles.sectionTitle}>Transactions to Review</h2>
+                  <h2 className={styles.sectionTitle}>Transações por rever</h2>
                   <p className={styles.sectionDescription}>
-                    Transacoes sem categoria ou ligadas a sugestoes pendentes do agente.
+                    Transações sem categoria ou ligadas a sugestões pendentes do agente.
                   </p>
                 </div>
                 <div className={styles.badgeRow}>
@@ -150,9 +150,9 @@ export default function ReviewPage() {
             <div className={styles.panelBody}>
               <div className={styles.sectionHeader}>
                 <div>
-                  <h2 className={styles.sectionTitle}>Rule Suggestions</h2>
+                  <h2 className={styles.sectionTitle}>Sugestões de regras</h2>
                   <p className={styles.sectionDescription}>
-                    Regras sugeridas pelo agente que ainda precisam de confirmacao humana.
+                    Regras sugeridas pelo agente que ainda precisam de confirmação humana.
                   </p>
                 </div>
                 <div className={styles.badgeRow}>

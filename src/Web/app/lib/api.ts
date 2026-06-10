@@ -105,6 +105,15 @@ export type UpdateTransactionCategoryInput = {
   pattern?: string;
 };
 
+export type ImportResult = {
+  imported: number;
+  ignored: number;
+  byStatus: Record<string, number>;
+  source: string;
+  accountId: number;
+  batchId: number;
+};
+
 type TransactionFilters = {
   month?: string;
   account?: string;
@@ -134,7 +143,6 @@ async function apiSend(path: string, init: RequestInit) {
     ...init,
     headers: {
       Accept: "application/json",
-      "Content-Type": "application/json",
       ...(init.headers ?? {}),
     },
     cache: "no-store",
@@ -143,6 +151,19 @@ async function apiSend(path: string, init: RequestInit) {
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
+}
+
+async function readApiError(response: Response) {
+  try {
+    const payload = (await response.json()) as { error?: string };
+    if (payload.error) {
+      return payload.error;
+    }
+  } catch {
+    // Ignore JSON parse errors and fall back to status text.
+  }
+
+  return `Request failed: ${response.status}`;
 }
 
 export function getAccounts() {
@@ -197,6 +218,9 @@ export function getCategories() {
 export function patchTransactionCategory(id: number, body: UpdateTransactionCategoryInput) {
   return apiSend(`/api/transactions/${id}/category`, {
     method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(body),
   });
 }
@@ -204,6 +228,9 @@ export function patchTransactionCategory(id: number, body: UpdateTransactionCate
 export function approveRuleSuggestion(id: number) {
   return apiSend(`/api/review/rule-suggestions/${id}/approve`, {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({}),
   });
 }
@@ -211,6 +238,26 @@ export function approveRuleSuggestion(id: number) {
 export function rejectRuleSuggestion(id: number) {
   return apiSend(`/api/review/rule-suggestions/${id}/reject`, {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({}),
   });
+}
+
+export async function uploadImport(file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch("/api/imports", {
+    method: "POST",
+    body: formData,
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  return (await response.json()) as ImportResult;
 }

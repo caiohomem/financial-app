@@ -3,6 +3,9 @@
   --font-body: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
   --ink-strong: #23242c;
   --ink-soft: #5f615f;
+  --accent: #1f5f55;
+  --accent-warm: #d58b2f;
+  --surface: rgba(255, 251, 245, 0.82);
   color-scheme: light;
 }
 

@@ -2,9 +2,11 @@
 
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import styles from "./dashboard.module.css";
+import ui from "./styles/ui.module.css";
 import { SpendingChart } from "./components/SpendingChart";
 import { SummaryCards } from "./components/SummaryCards";
 import { TransactionList } from "./components/TransactionList";
+import { formatMonthLabel, last12Months, monthKey } from "./lib/format";
 import {
   getAccounts,
   getSpendingByCategory,
@@ -180,6 +182,11 @@ export default function HomePage() {
           </div>
         </header>
 
+        <p className={ui.dataSourceNote} role="status">
+          <span aria-hidden="true">●</span>
+          Dados ao vivo da base de dados via API — saldos, categorias e transações do mês selecionado.
+        </p>
+
         <div className={styles.grid}>
           <div className={styles.column}>
             <SummaryCards accounts={accounts} totalSpent={totalSpent} monthLabel={monthLabel} />
@@ -205,28 +212,3 @@ export default function HomePage() {
   );
 }
 
-function last12Months() {
-  const months: string[] = [];
-  const today = new Date();
-
-  for (let offset = 0; offset < 12; offset += 1) {
-    const date = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - offset, 1));
-    months.push(monthKey(date));
-  }
-
-  return months;
-}
-
-function monthKey(date: Date) {
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-  return `${year}-${month}`;
-}
-
-function formatMonthLabel(month: string) {
-  const [year, numericMonth] = month.split("-").map(Number);
-  return new Intl.DateTimeFormat("pt-PT", {
-    month: "long",
-    year: "numeric",
-  }).format(new Date(Date.UTC(year, numericMonth - 1, 1)));
-}
