@@ -24,8 +24,10 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
         bool seekingInitialBalance = false;
         var transactions = new List<ParsedTransaction>();
 
-        foreach (var line in lines)
+        for (var lineIndex = 0; lineIndex < lines.Count; lineIndex++)
         {
+            var line = lines[lineIndex];
+
             if (TryParseInitialBalance(line.Text, out var initialBalance))
             {
                 previousBalance ??= initialBalance;
@@ -33,8 +35,9 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
                 continue;
             }
 
-            // Handle PDFs where "SALDO INICIAL" label and its amount are on separate lines
-            // (different Y-coordinates in the PDF table layout)
+            // Handle PDFs where "SALDO INICIAL" label and its amount land on separate
+            // extracted lines (the table cell sits at a slightly different Y-coordinate):
+            // the amount may come on the line right before or right after the label.
             if (seekingInitialBalance)
             {
                 seekingInitialBalance = false;
@@ -45,9 +48,21 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
                     continue;
                 }
             }
-            else if (Normalize(line.Text).Contains("SALDO INICIAL", StringComparison.Ordinal))
+            else if (ContainsIgnoringSpaces(line.Text, "SALDOINICIAL"))
             {
-                seekingInitialBalance = true;
+                var previousMatches = lineIndex > 0
+                    ? AmountRegex().Matches(lines[lineIndex - 1].Text)
+                    : null;
+                if (previousMatches is { Count: > 0 } &&
+                    TryParseAmount(previousMatches[^1].Value, out var lookbackBalance))
+                {
+                    previousBalance ??= lookbackBalance;
+                }
+                else
+                {
+                    seekingInitialBalance = true;
+                }
+
                 continue;
             }
 
@@ -64,15 +79,12 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
                 continue;
             }
 
+            // Never skip a parsed transaction for lack of description: skipping breaks the
+            // running-balance chain and silently merges its amount into the next transaction.
             var rawDescription = string.IsNullOrWhiteSpace(parsedLine.RawDescription)
-                ? pendingDescription
+                ? pendingDescription ?? "(SEM DESCRITIVO)"
                 : parsedLine.RawDescription;
             pendingDescription = null;
-
-            if (string.IsNullOrWhiteSpace(rawDescription))
-            {
-                continue;
-            }
 
             var delta = parsedLine.RunningBalance - previousBalance.Value;
             if (Math.Abs(delta) < BalanceTolerance)
@@ -185,7 +197,9 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
     private static bool TryParseInitialBalance(string line, out decimal balance)
     {
         balance = default;
-        if (!Normalize(line).Contains("SALDO INICIAL", StringComparison.Ordinal))
+        // Space-insensitive match: rotated margin text in some PDFs interleaves with the
+        // table row, splitting the label (e.g. "S a SALDO INICIA L 615.38", "SALDO INI CIAL 0.00")
+        if (!ContainsIgnoringSpaces(line, "SALDOINICIAL"))
         {
             return false;
         }
@@ -193,6 +207,11 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
         var matches = AmountRegex().Matches(line);
         return matches.Count > 0 && TryParseAmount(matches[^1].Value, out balance);
     }
+
+    private static bool ContainsIgnoringSpaces(string line, string compactTarget) =>
+        Normalize(line)
+            .Replace(" ", string.Empty, StringComparison.Ordinal)
+            .Contains(compactTarget, StringComparison.Ordinal);
 
     private static bool TryParseTransactionLine(string line, out ParsedLine parsedLine)
     {
@@ -238,18 +257,25 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
             return false;
         }
 
-        var markerIndex = DescriptionMarkers
+        var candidates = DescriptionMarkers
             .Select(marker => line.IndexOf(marker, StringComparison.OrdinalIgnoreCase))
             .Where(index => index >= 0)
-            .DefaultIfEmpty(-1)
-            .Min();
+            .ToList();
 
-        if (markerIndex < 0)
+        // Direct-debit references come glued to the marker (e.g. "DDPT51100087 HP HEALTH CL"),
+        // so the space-suffixed "DD " marker never matches them
+        var ddMatch = DirectDebitReferenceRegex().Match(line);
+        if (ddMatch.Success)
+        {
+            candidates.Add(ddMatch.Index);
+        }
+
+        if (candidates.Count == 0)
         {
             return false;
         }
 
-        description = line[markerIndex..].Trim();
+        description = line[candidates.Min()..].Trim();
         return true;
     }
 
@@ -337,4 +363,7 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
         @"DEP[ÓO]SITO\s+A\s+ORDEM\s*:?\s*(?<number>\d{6,})",
         RegexOptions.IgnoreCase)]
     private static partial Regex DepositNumberRegex();
+
+    [GeneratedRegex(@"(?<![A-Za-z])DD[A-Z]{2}\d{4,}")]
+    private static partial Regex DirectDebitReferenceRegex();
 }
