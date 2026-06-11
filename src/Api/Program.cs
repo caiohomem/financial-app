@@ -133,21 +133,43 @@ app.MapGet(
         await connection.OpenAsync(cancellationToken);
 
         var categories = await Program.LoadSpendingByCategoryAsync(connection, resolvedMonth, cancellationToken);
+        var totals = await Program.LoadMonthTotalsAsync(connection, resolvedMonth, cancellationToken);
         return Results.Ok(new
         {
             month = resolvedMonth,
-            categories
+            categories,
+            totals
         });
     });
 
 app.MapGet(
     "/api/monthly-trend",
-    async (CancellationToken cancellationToken) =>
+    async (string? fromDate, string? toDate, CancellationToken cancellationToken) =>
     {
+        DateOnly? parsedFromDate = null;
+        if (!string.IsNullOrWhiteSpace(fromDate))
+        {
+            if (!DateOnly.TryParse(fromDate, out var date))
+            {
+                return Results.BadRequest(new { error = "Expected fromDate in YYYY-MM-DD format." });
+            }
+            parsedFromDate = date;
+        }
+
+        DateOnly? parsedToDate = null;
+        if (!string.IsNullOrWhiteSpace(toDate))
+        {
+            if (!DateOnly.TryParse(toDate, out var date))
+            {
+                return Results.BadRequest(new { error = "Expected toDate in YYYY-MM-DD format." });
+            }
+            parsedToDate = date;
+        }
+
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var trend = await Program.LoadMonthlyTrendAsync(connection, cancellationToken);
+        var trend = await Program.LoadMonthlyTrendAsync(connection, parsedFromDate, parsedToDate, cancellationToken);
         return Results.Ok(trend);
     });
 
@@ -1705,22 +1727,44 @@ public partial class Program
 
     internal static async Task<IReadOnlyList<MonthlyTrendItem>> LoadMonthlyTrendAsync(
         NpgsqlConnection connection,
+        DateOnly? fromDate,
+        DateOnly? toDate,
         CancellationToken cancellationToken)
     {
         var trends = new List<MonthlyTrendItem>();
 
         await using var command = connection.CreateCommand();
-        command.CommandText = """
+        var conditions = new List<string>
+        {
+            "transactions.status <> 'cancelled'",
+            "transactions.is_own_transfer = false"
+        };
+
+        if (fromDate is not null)
+        {
+            conditions.Add("transactions.booking_date >= @fromDate");
+            command.Parameters.AddWithValue("fromDate", fromDate.Value);
+        }
+
+        if (toDate is not null)
+        {
+            conditions.Add("transactions.booking_date <= @toDate");
+            command.Parameters.AddWithValue("toDate", toDate.Value);
+        }
+
+        // Without an explicit range, keep the original behaviour: last 12 months
+        var limitClause = fromDate is null && toDate is null ? "LIMIT 12" : string.Empty;
+
+        command.CommandText = $"""
             SELECT
                 TO_CHAR(transactions.booking_date, 'YYYY-MM') AS month,
                 SUM(CASE WHEN transactions.direction = 'IN' THEN transactions.amount ELSE 0 END) AS credits,
                 SUM(CASE WHEN transactions.direction = 'OUT' THEN ABS(transactions.amount) ELSE 0 END) AS debits
             FROM transactions
-            WHERE transactions.status <> 'cancelled'
-              AND transactions.is_own_transfer = false
+            WHERE {string.Join(" AND ", conditions)}
             GROUP BY TO_CHAR(transactions.booking_date, 'YYYY-MM')
             ORDER BY month DESC
-            LIMIT 12;
+            {limitClause};
             """;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1734,6 +1778,34 @@ public partial class Program
 
         trends.Reverse();
         return trends;
+    }
+
+    internal static async Task<MonthTotals> LoadMonthTotalsAsync(
+        NpgsqlConnection connection,
+        string month,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                COALESCE(SUM(CASE WHEN transactions.direction = 'IN' THEN transactions.amount ELSE 0 END), 0) AS credits,
+                COALESCE(SUM(CASE WHEN transactions.direction = 'OUT' THEN ABS(transactions.amount) ELSE 0 END), 0) AS debits
+            FROM transactions
+            WHERE transactions.status <> 'cancelled'
+              AND transactions.is_own_transfer = false
+              AND TO_CHAR(transactions.booking_date, 'YYYY-MM') = @month;
+            """;
+        command.Parameters.AddWithValue("month", month);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return new MonthTotals(
+                Math.Round(reader.GetDecimal(0), 2),
+                Math.Round(reader.GetDecimal(1), 2));
+        }
+
+        return new MonthTotals(0, 0);
     }
 
     internal static async Task<IReadOnlyList<DashboardCategorySpend>> LoadSpendingByCategoryAsync(
@@ -2340,6 +2412,10 @@ public partial class Program
 
     internal sealed record MonthlyTrendItem(
         string Month,
+        decimal Credits,
+        decimal Debits);
+
+    internal sealed record MonthTotals(
         decimal Credits,
         decimal Debits);
 

@@ -4,6 +4,8 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, type PieLabelRenderP
 
 type CatChartProps = {
   categories: Array<{ category: string; total: number }>;
+  selectedCategory?: string;
+  onCategoryClick?: (category: string) => void;
 };
 
 const COLORS = [
@@ -22,13 +24,15 @@ const renderLabel = (props: PieLabelRenderProps) => {
   return value.toLocaleString("pt-PT");
 };
 
-export function CategorySpendChart({ categories }: CatChartProps) {
-  const data = categories.slice(0, 6).map((cat) => ({
+export function CategorySpendChart({ categories, selectedCategory, onCategoryClick }: CatChartProps) {
+  const total = categories.reduce((sum, cat) => sum + cat.total, 0);
+
+  const pieData = categories.slice(0, 7).map((cat) => ({
     name: cat.category,
     value: Math.round(cat.total),
   }));
 
-  if (data.length === 0) {
+  if (pieData.length === 0) {
     return (
       <div
         className="rounded-xl p-8 border flex flex-col items-center justify-center h-80"
@@ -50,24 +54,44 @@ export function CategorySpendChart({ categories }: CatChartProps) {
         borderColor: "var(--border)",
       }}
     >
-      <h3 style={{ color: "var(--text-primary)", marginTop: 0 }} className="text-sm font-semibold mb-4">
-        Gastos por Categoria
-      </h3>
-      <ResponsiveContainer width="100%" height={300}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 style={{ color: "var(--text-primary)", marginTop: 0, marginBottom: 0 }} className="text-sm font-semibold">
+          Gastos por Categoria
+        </h3>
+        {selectedCategory && (
+          <button
+            onClick={() => onCategoryClick?.(selectedCategory)}
+            className="px-2 py-1 rounded text-xs font-medium"
+            style={{ backgroundColor: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
+          >
+            {selectedCategory} ✕
+          </button>
+        )}
+      </div>
+      <ResponsiveContainer width="100%" height={240}>
         <PieChart>
           <Pie
-            data={data}
+            data={pieData}
             cx="50%"
             cy="50%"
-            innerRadius={80}
-            outerRadius={120}
+            innerRadius={62}
+            outerRadius={95}
             paddingAngle={2}
             dataKey="value"
             label={renderLabel}
             labelLine={false}
+            onClick={(entry) => {
+              const name = (entry as { name?: string }).name;
+              if (name) onCategoryClick?.(name);
+            }}
+            style={{ cursor: onCategoryClick ? "pointer" : "default" }}
           >
-            {data.map((_, index) => (
-              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+            {pieData.map((item, index) => (
+              <Cell
+                key={`cell-${index}`}
+                fill={COLORS[index % COLORS.length]}
+                fillOpacity={!selectedCategory || selectedCategory === item.name ? 1 : 0.3}
+              />
             ))}
           </Pie>
           <Tooltip
@@ -81,18 +105,46 @@ export function CategorySpendChart({ categories }: CatChartProps) {
           />
         </PieChart>
       </ResponsiveContainer>
-      <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-        {data.map((item, idx) => (
-          <div key={item.name} className="flex items-center gap-2">
-            <div
-              className="w-2 h-2 rounded-full"
-              style={{ backgroundColor: COLORS[idx % COLORS.length] }}
-            />
-            <span style={{ color: "var(--text-secondary)" }}>
-              {item.name} ({item.value.toLocaleString("pt-PT")})
-            </span>
-          </div>
-        ))}
+
+      {/* Lista ranqueada: todas as categorias com valor e % do total, clicáveis */}
+      <div className="mt-4 space-y-1 max-h-48 overflow-y-auto pr-1">
+        {categories.map((item, idx) => {
+          const share = total > 0 ? (item.total / total) * 100 : 0;
+          const isSelected = selectedCategory === item.category;
+          const color = COLORS[idx % COLORS.length];
+          return (
+            <button
+              key={item.category}
+              onClick={() => onCategoryClick?.(item.category)}
+              className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors text-left"
+              style={{
+                backgroundColor: isSelected ? "var(--bg-tertiary)" : "transparent",
+                outline: isSelected ? "1px solid var(--accent)" : "none",
+                cursor: onCategoryClick ? "pointer" : "default",
+              }}
+              onMouseEnter={(e) => {
+                if (!isSelected) e.currentTarget.style.backgroundColor = "var(--bg-tertiary)";
+              }}
+              onMouseLeave={(e) => {
+                if (!isSelected) e.currentTarget.style.backgroundColor = "transparent";
+              }}
+            >
+              <span
+                className="w-2 h-2 rounded-full shrink-0"
+                style={{ backgroundColor: idx < 7 ? color : "var(--text-tertiary)" }}
+              />
+              <span className="flex-1 truncate" style={{ color: "var(--text-secondary)" }}>
+                {item.category}
+              </span>
+              <span className="font-medium tabular-nums" style={{ color: "var(--text-primary)" }}>
+                {item.total.toLocaleString("pt-PT", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+              </span>
+              <span className="w-12 text-right tabular-nums" style={{ color: "var(--text-tertiary)" }}>
+                {share.toFixed(1)}%
+              </span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

@@ -1,22 +1,32 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 type TrendChartProps = {
   data: Array<{ month: string; credits: number; debits: number }>;
+  toolbar?: ReactNode;
 };
 
-export function MonthlyTrendChart({ data }: TrendChartProps) {
+export function MonthlyTrendChart({ data, toolbar }: TrendChartProps) {
   if (data.length === 0) {
     return (
       <div
-        className="rounded-xl p-8 border flex flex-col items-center justify-center h-80"
+        className="rounded-xl p-6 border flex flex-col h-80"
         style={{
           backgroundColor: "var(--bg-secondary)",
           borderColor: "var(--border)",
         }}
       >
-        <p style={{ color: "var(--text-tertiary)" }}>Sem dados para exibir</p>
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ color: "var(--text-primary)", marginTop: 0, marginBottom: 0 }} className="text-sm font-semibold">
+            Evolução Mensal
+          </h3>
+          {toolbar}
+        </div>
+        <div className="flex-1 flex items-center justify-center">
+          <p style={{ color: "var(--text-tertiary)" }}>Sem dados para exibir</p>
+        </div>
       </div>
     );
   }
@@ -29,9 +39,12 @@ export function MonthlyTrendChart({ data }: TrendChartProps) {
         borderColor: "var(--border)",
       }}
     >
-      <h3 style={{ color: "var(--text-primary)", marginTop: 0 }} className="text-sm font-semibold mb-4">
-        Evolução Mensal
-      </h3>
+      <div className="flex items-center justify-between mb-4">
+        <h3 style={{ color: "var(--text-primary)", marginTop: 0, marginBottom: 0 }} className="text-sm font-semibold">
+          Evolução Mensal
+        </h3>
+        {toolbar}
+      </div>
       <ResponsiveContainer width="100%" height={300}>
         <AreaChart data={data}>
           <defs>

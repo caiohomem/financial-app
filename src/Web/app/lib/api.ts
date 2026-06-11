@@ -14,6 +14,10 @@ export type CategorySpend = {
 export type SpendingByCategoryResponse = {
   month: string;
   categories: CategorySpend[];
+  totals: {
+    credits: number;
+    debits: number;
+  };
 };
 
 export type MonthlyCategorySummary = {
@@ -187,8 +191,12 @@ export type MonthlyTrendData = {
   debits: number;
 };
 
-export function getMonthlyTrend() {
-  return apiFetch<MonthlyTrendData[]>("/api/monthly-trend");
+export function getMonthlyTrend(range?: { fromDate?: string; toDate?: string }) {
+  const query = new URLSearchParams();
+  if (range?.fromDate) query.set("fromDate", range.fromDate);
+  if (range?.toDate) query.set("toDate", range.toDate);
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return apiFetch<MonthlyTrendData[]>(`/api/monthly-trend${suffix}`);
 }
 
 export function getMonthlyReport(month: string) {
