@@ -2,9 +2,9 @@
   min-height: 100vh;
   color: var(--ink-strong);
   background:
-    radial-gradient(circle at top left, rgba(242, 170, 76, 0.16), transparent 28%),
-    radial-gradient(circle at 80% 0%, rgba(26, 79, 70, 0.14), transparent 24%),
-    linear-gradient(180deg, #f5f0e8 0%, #efe7da 45%, #e8dcc8 100%);
+    radial-gradient(circle at top left, rgba(245, 158, 11, 0.15), transparent 28%),
+    radial-gradient(circle at 80% 0%, rgba(59, 130, 246, 0.2), transparent 24%),
+    linear-gradient(180deg, var(--bg-primary) 0%, var(--bg-primary) 45%, var(--border) 100%);
 }
 
 .shell {
@@ -37,11 +37,12 @@
 
 .title {
   margin: 0;
-  max-width: 11ch;
   font-family: var(--font-display);
-  font-size: clamp(3rem, 7vw, 5.1rem);
-  line-height: 0.94;
-  letter-spacing: -0.06em;
+  font-size: clamp(1.75rem, 3.5vw, 2.6rem);
+  line-height: 1.1;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  white-space: nowrap;
 }
 
 .subtitle {
@@ -57,8 +58,8 @@
   align-items: center;
   padding: 8px 12px;
   border-radius: 999px;
-  background: rgba(31, 95, 85, 0.1);
-  color: #1f5f55;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
   font-size: 0.78rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -72,10 +73,10 @@
 .panel {
   position: relative;
   overflow: hidden;
-  border: 1px solid rgba(42, 44, 57, 0.1);
+  border: 1px solid var(--border);
   border-radius: 28px;
-  background: rgba(255, 251, 245, 0.82);
-  box-shadow: 0 28px 70px rgba(73, 52, 25, 0.12);
+  background: var(--bg-secondary);
+  box-shadow: 0 28px 70px var(--border);
   backdrop-filter: blur(16px);
 }
 
@@ -126,8 +127,8 @@
 }
 
 .softBadge {
-  background: rgba(212, 161, 81, 0.14);
-  color: #86561a;
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning);
 }
 
 .warningBadge {
@@ -136,24 +137,24 @@
 }
 
 .successBadge {
-  background: rgba(31, 95, 85, 0.12);
-  color: #1f5f55;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
 }
 
 .feedback {
   margin-bottom: 16px;
   padding: 14px 16px;
   border-radius: 18px;
-  background: rgba(31, 95, 85, 0.1);
-  color: #1f5f55;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
 }
 
 .errorBox {
   margin-bottom: 16px;
   padding: 14px 16px;
   border-radius: 18px;
-  background: rgba(157, 55, 39, 0.1);
-  color: #8c2f20;
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error);
 }
 
 .tableWrap {
@@ -176,7 +177,7 @@
 
 .table td {
   padding: 16px 12px 16px 0;
-  border-top: 1px solid rgba(42, 44, 57, 0.08);
+  border-top: 1px solid var(--border);
   vertical-align: top;
 }
 
@@ -199,9 +200,9 @@
 .input {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid rgba(42, 44, 57, 0.12);
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background: rgba(255, 253, 249, 0.95);
+  background: var(--bg-tertiary);
   color: var(--ink-strong);
 }
 
@@ -234,23 +235,23 @@
 }
 
 .button {
-  background: #1f5f55;
-  color: #fffaf2;
+  background: var(--accent);
+  color: var(--bg-tertiary);
 }
 
 .secondaryButton {
-  background: rgba(212, 161, 81, 0.18);
-  color: #86561a;
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning);
 }
 
 .ghostButton {
-  background: rgba(42, 44, 57, 0.06);
+  background: rgba(0, 0, 0, 0.3);
   color: var(--ink-strong);
 }
 
 .dangerButton {
-  background: rgba(157, 55, 39, 0.12);
-  color: #8c2f20;
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error);
 }
 
 .button:hover,
@@ -265,7 +266,18 @@
   margin-top: 12px;
   padding: 14px;
   border-radius: 18px;
-  background: rgba(42, 44, 57, 0.04);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.newCategoryInline {
+  margin-top: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .promptTitle {
@@ -292,18 +304,67 @@
   white-space: nowrap;
 }
 
+.previewCell {
+  padding: 0 !important;
+  border-top: none !important;
+}
+
+.previewBox {
+  margin: 0 0 12px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.15);
+}
+
+.previewOriginRow td {
+  background: rgba(59, 130, 246, 0.08);
+  font-weight: 600;
+}
+
+.transferCard {
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.transferInfo {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.transferAmount {
+  font-size: 1.1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.transferMeta {
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 .amountOut {
   color: #9a5911;
 }
 
 .amountIn {
-  color: #1f5f55;
+  color: var(--accent);
 }
 
 .emptyState {
   padding: 18px;
   border-radius: 18px;
-  background: rgba(42, 44, 57, 0.04);
+  background: rgba(0, 0, 0, 0.25);
   color: var(--ink-soft);
 }
 
@@ -319,9 +380,9 @@
   width: min(560px, calc(100vw - 32px));
   padding: 24px;
   border-radius: 28px;
-  border: 1px solid rgba(42, 44, 57, 0.1);
-  background: rgba(255, 251, 245, 0.9);
-  box-shadow: 0 28px 70px rgba(73, 52, 25, 0.12);
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  box-shadow: 0 28px 70px var(--border);
 }
 
 @media (max-width: 860px) {

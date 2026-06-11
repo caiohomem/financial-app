@@ -14,3 +14,10 @@ npm-debug.log*
 # OS/editor
 .DS_Store
 Thumbs.db
+
+# Dados pessoais / segredos — nunca commitar
+anexos_activobank/
+ImportFromGmail.py
+
+# Build artifacts
+*.tsbuildinfo

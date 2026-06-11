@@ -1,0 +1,107 @@
+.grid {
+  display: grid;
+  gap: 24px;
+  max-width: 680px;
+}
+
+.dangerPanel {
+  border-color: rgba(239, 68, 68, 0.12);
+}
+
+.badgeDanger {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error);
+}
+
+.actionRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.12);
+}
+
+.actionInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.actionTitle {
+  margin: 0 0 4px;
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+
+.actionDescription {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+
+.dangerButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--error);
+  color: #fff;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.dangerButton:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(160, 32, 32, 0.3);
+}
+
+.confirmBox {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.confirmText {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--error);
+}
+
+.confirmActions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.successBox,
+.errorBox {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.statusText {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+}
+
+.errorText {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--error);
+}

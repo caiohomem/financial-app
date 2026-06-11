@@ -46,28 +46,41 @@ export default function ReportPage() {
 
   if (loading) {
     return (
-      <main className={styles.loading}>
-        <div className={styles.feedbackCard}>
-          <h1 className={styles.sectionTitle}>A gerar relatorio mensal</h1>
-          <p className={styles.sectionDescription}>
-            A gerar relatorio e a analisar anomalias do mes selecionado.
+      <div style={{ backgroundColor: "var(--bg-primary)" }} className="min-h-screen flex flex-col items-center justify-center px-4">
+        <div className="rounded-xl p-8 border text-center" style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border)" }}>
+          <div className="mb-4 inline-block">
+            <div className="w-12 h-12 rounded-lg animate-spin" style={{ borderTop: "3px solid var(--accent)", borderRight: "3px solid transparent" }} />
+          </div>
+          <h1 style={{ color: "var(--text-primary)", marginTop: 0 }} className="text-lg font-semibold">
+            A gerar relatório mensal
+          </h1>
+          <p style={{ color: "var(--text-tertiary)" }} className="text-sm">
+            A gerar relatório e a analisar anomalias do mês selecionado.
           </p>
         </div>
-      </main>
+      </div>
     );
   }
 
   if (error || !report) {
     return (
-      <main className={styles.error}>
-        <div className={styles.feedbackCard}>
-          <h1 className={styles.sectionTitle}>Falha ao carregar o relatorio</h1>
-          <p className={styles.sectionDescription}>{error ?? "Sem dados para apresentar."}</p>
-          <button type="button" className={styles.retryButton} onClick={() => window.location.reload()}>
+      <div style={{ backgroundColor: "var(--bg-primary)" }} className="min-h-screen flex flex-col items-center justify-center px-4">
+        <div className="rounded-xl p-8 border text-center max-w-md" style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border)" }}>
+          <h1 style={{ color: "var(--error)", marginTop: 0 }} className="text-lg font-semibold">
+            Falha ao carregar o relatório
+          </h1>
+          <p style={{ color: "var(--text-secondary)" }} className="text-sm mb-6">
+            {error ?? "Sem dados para apresentar."}
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-6 py-2 rounded-lg font-medium transition-all"
+            style={{ backgroundColor: "var(--accent)", color: "white" }}
+          >
             Tentar novamente
           </button>
         </div>
-      </main>
+      </div>
     );
   }
 
@@ -77,13 +90,13 @@ export default function ReportPage() {
   );
 
   return (
-    <main className={styles.page}>
-      <div className={styles.shell}>
+    <div style={{ backgroundColor: "var(--bg-primary)" }} className="min-h-screen">
+      <div className="max-w-7xl mx-auto px-6 py-8">
         <header className={styles.hero}>
           <p className={styles.eyebrow}>Financial App · relatorio mensal</p>
           <div className={styles.titleRow}>
             <div>
-              <h1 className={styles.title}>Resumo narrativo com sinais fora do padrao.</h1>
+              <h1 className={styles.title}>Relatório mensal</h1>
               <p className={styles.subtitle}>
                 Leitura mensal em linguagem natural, comparacao com o periodo anterior e apoio
                 visual para categorias, merchants e desvios relevantes.
@@ -226,7 +239,7 @@ export default function ReportPage() {
           </section>
         </div>
       </div>
-    </main>
+    </div>
   );
 }
 

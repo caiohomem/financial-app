@@ -21,6 +21,7 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
 
         decimal? previousBalance = null;
         string? pendingDescription = null;
+        bool seekingInitialBalance = false;
         var transactions = new List<ParsedTransaction>();
 
         foreach (var line in lines)
@@ -28,6 +29,25 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
             if (TryParseInitialBalance(line.Text, out var initialBalance))
             {
                 previousBalance ??= initialBalance;
+                seekingInitialBalance = false;
+                continue;
+            }
+
+            // Handle PDFs where "SALDO INICIAL" label and its amount are on separate lines
+            // (different Y-coordinates in the PDF table layout)
+            if (seekingInitialBalance)
+            {
+                seekingInitialBalance = false;
+                var amountMatches = AmountRegex().Matches(line.Text);
+                if (amountMatches.Count > 0 && TryParseAmount(amountMatches[^1].Value, out var fallbackBalance))
+                {
+                    previousBalance ??= fallbackBalance;
+                    continue;
+                }
+            }
+            else if (Normalize(line.Text).Contains("SALDO INICIAL", StringComparison.Ordinal))
+            {
+                seekingInitialBalance = true;
                 continue;
             }
 
@@ -183,6 +203,15 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
             return false;
         }
 
+        var bookingStr = transactionMatch.Groups["booking"].Value;
+        var valueStr = transactionMatch.Groups["value"].Value;
+
+        // Reject regex matches where a decimal amount was mistaken for a date (e.g. "51.67" → month=51)
+        if (!IsValidMonthDay(bookingStr) || !IsValidMonthDay(valueStr))
+        {
+            return false;
+        }
+
         var body = transactionMatch.Groups["body"].Value;
         var amounts = AmountRegex().Matches(body);
         if (amounts.Count < 2 ||
@@ -193,8 +222,8 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
 
         var rawDescription = body[..amounts[^2].Index].Trim();
         parsedLine = new ParsedLine(
-            transactionMatch.Groups["booking"].Value,
-            transactionMatch.Groups["value"].Value,
+            bookingStr,
+            valueStr,
             rawDescription,
             runningBalance);
 
@@ -222,6 +251,14 @@ public sealed partial class ActivoBankPdfParser : IStatementParser
 
         description = line[markerIndex..].Trim();
         return true;
+    }
+
+    private static bool IsValidMonthDay(string monthDay)
+    {
+        var parts = monthDay.Split('.');
+        return parts.Length == 2
+            && int.TryParse(parts[0], out var month) && month >= 1 && month <= 12
+            && int.TryParse(parts[1], out var day) && day >= 1 && day <= 31;
     }
 
     private static bool TryParseAmount(string value, out decimal amount) =>

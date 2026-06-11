@@ -7,9 +7,12 @@ import {
   getCategories,
   getReviewTransactions,
   getRuleSuggestions,
+  getTransferCandidates,
+  markTransfers,
   type Category,
   type ReviewTransaction,
   type RuleSuggestion,
+  type TransferCandidate,
 } from "../lib/api";
 import styles from "./review.module.css";
 
@@ -17,9 +20,11 @@ export default function ReviewPage() {
   const [transactions, setTransactions] = useState<ReviewTransaction[]>([]);
   const [suggestions, setSuggestions] = useState<RuleSuggestion[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [transferCandidates, setTransferCandidates] = useState<TransferCandidate[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [markingTransfer, setMarkingTransfer] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -29,10 +34,11 @@ export default function ReviewPage() {
         setLoading(true);
         setError(null);
 
-        const [transactionsResponse, suggestionsResponse, categoriesResponse] = await Promise.all([
+        const [transactionsResponse, suggestionsResponse, categoriesResponse, transfersResponse] = await Promise.all([
           getReviewTransactions(),
           getRuleSuggestions(),
           getCategories(),
+          getTransferCandidates(),
         ]);
 
         if (cancelled) {
@@ -42,6 +48,7 @@ export default function ReviewPage() {
         setTransactions(transactionsResponse);
         setSuggestions(suggestionsResponse);
         setCategories(categoriesResponse);
+        setTransferCandidates(transfersResponse);
       } catch (loadError) {
         if (!cancelled) {
           setError(loadError instanceof Error ? loadError.message : "Failed to load review page.");
@@ -71,36 +78,45 @@ export default function ReviewPage() {
 
   if (loading) {
     return (
-      <main className={styles.loading}>
-        <div className={styles.loadingCard}>
-          <h1 className={styles.sectionTitle}>A carregar fila de revisao</h1>
-          <p className={styles.sectionDescription}>
-            A preparar transacoes pendentes, categorias canonicas e sugestoes de regra.
+      <div style={{ backgroundColor: "var(--bg-primary)" }} className="min-h-screen flex flex-col items-center justify-center px-4">
+        <div className="rounded-xl p-8 border text-center" style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border)" }}>
+          <div className="mb-4 inline-block">
+            <div className="w-12 h-12 rounded-lg animate-spin" style={{ borderTop: "3px solid var(--accent)", borderRight: "3px solid transparent" }} />
+          </div>
+          <h1 style={{ color: "var(--text-primary)", marginTop: 0 }} className="text-lg font-semibold">
+            A carregar fila de revisão
+          </h1>
+          <p style={{ color: "var(--text-tertiary)" }} className="text-sm">
+            A preparar transações pendentes, categorias e sugestões de regra.
           </p>
         </div>
-      </main>
+      </div>
     );
   }
 
   if (error) {
     return (
-      <main className={styles.error}>
-        <div className={styles.errorCard}>
-          <h1 className={styles.sectionTitle}>Falha ao carregar revisao</h1>
-          <p className={styles.sectionDescription}>{error}</p>
+      <div style={{ backgroundColor: "var(--bg-primary)" }} className="min-h-screen flex flex-col items-center justify-center px-4">
+        <div className="rounded-xl p-8 border text-center max-w-md" style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border)" }}>
+          <h1 style={{ color: "var(--error)", marginTop: 0 }} className="text-lg font-semibold">
+            Falha ao carregar revisão
+          </h1>
+          <p style={{ color: "var(--text-secondary)" }} className="text-sm">
+            {error}
+          </p>
         </div>
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className={styles.page}>
-      <div className={styles.shell}>
+    <div style={{ backgroundColor: "var(--bg-primary)" }} className="min-h-screen">
+      <div className="max-w-7xl mx-auto px-6 py-8">
         <header className={styles.hero}>
           <p className={styles.eyebrow}>Financial App · review loop</p>
           <div className={styles.titleRow}>
             <div>
-              <h1 className={styles.title}>Revisao que ensina o sistema.</h1>
+              <h1 className={styles.title}>Revisão</h1>
               <p className={styles.subtitle}>
                 Corrija categorias com uma acao deliberada, decida se a correcao deve virar
                 regra por merchant e trate as sugestoes pendentes do agente antes que a fila
@@ -108,7 +124,7 @@ export default function ReviewPage() {
               </p>
             </div>
             <span className={styles.heroBadge}>
-              {transactions.length + suggestions.length} itens em fila
+              {transactions.length + suggestions.length + transferCandidates.length} itens em fila
             </span>
           </div>
         </header>
@@ -118,9 +134,9 @@ export default function ReviewPage() {
             <div className={styles.panelBody}>
               <div className={styles.sectionHeader}>
                 <div>
-                  <h2 className={styles.sectionTitle}>Transactions to Review</h2>
+                  <h2 className={styles.sectionTitle}>Transações por rever</h2>
                   <p className={styles.sectionDescription}>
-                    Transacoes sem categoria ou ligadas a sugestoes pendentes do agente.
+                    Transações sem categoria ou ligadas a sugestões pendentes do agente.
                   </p>
                 </div>
                 <div className={styles.badgeRow}>
@@ -141,6 +157,9 @@ export default function ReviewPage() {
                     current.filter((suggestion) => suggestion.transactionId !== transactionId),
                   );
                 }}
+                onCategoryCreated={(category) =>
+                  setCategories((current) => [...current, category])
+                }
                 onToast={setToast}
               />
             </div>
@@ -150,9 +169,9 @@ export default function ReviewPage() {
             <div className={styles.panelBody}>
               <div className={styles.sectionHeader}>
                 <div>
-                  <h2 className={styles.sectionTitle}>Rule Suggestions</h2>
+                  <h2 className={styles.sectionTitle}>Sugestões de regras</h2>
                   <p className={styles.sectionDescription}>
-                    Regras sugeridas pelo agente que ainda precisam de confirmacao humana.
+                    Regras sugeridas pelo agente que ainda precisam de confirmação humana.
                   </p>
                 </div>
                 <div className={styles.badgeRow}>
@@ -162,6 +181,7 @@ export default function ReviewPage() {
 
               <RuleSuggestionsList
                 suggestions={suggestions}
+                categories={categories}
                 onResolved={(suggestionId) =>
                   setSuggestions((current) =>
                     current.filter((suggestion) => suggestion.id !== suggestionId),
@@ -171,8 +191,80 @@ export default function ReviewPage() {
               />
             </div>
           </section>
+          {transferCandidates.length > 0 && (
+            <section className={styles.panel}>
+              <div className={styles.panelBody}>
+                <div className={styles.sectionHeader}>
+                  <div>
+                    <h2 className={styles.sectionTitle}>Transferências internas</h2>
+                    <p className={styles.sectionDescription}>
+                      Pares de transações com o mesmo valor entre as suas contas. Confirma as que são
+                      transferências próprias — serão excluídas dos cálculos de gastos.
+                    </p>
+                  </div>
+                  <span className={styles.softBadge}>{transferCandidates.length} pares</span>
+                </div>
+
+                {transferCandidates.map((candidate) => {
+                  const key = `${candidate.outId}-${candidate.inId}`;
+                  const isMarking = markingTransfer === key;
+
+                  return (
+                    <div key={key} className={styles.transferCard}>
+                      <div className={styles.transferInfo}>
+                        <span className={styles.transferAmount}>
+                          {new Intl.NumberFormat("pt-PT", { style: "currency", currency: candidate.outCurrency }).format(candidate.amount)}
+                        </span>
+                        <span className={styles.transferMeta}>
+                          Saída: {candidate.outAccount} ({candidate.outSource}) em {candidate.outDate}
+                        </span>
+                        <span className={styles.transferMeta}>
+                          Entrada: {candidate.inAccount} ({candidate.inSource}) em {candidate.inDate}
+                        </span>
+                      </div>
+                      <div className={styles.actions}>
+                        <button
+                          type="button"
+                          className={styles.button}
+                          disabled={isMarking}
+                          onClick={async () => {
+                            setMarkingTransfer(key);
+                            try {
+                              const res = await markTransfers([candidate.outId, candidate.inId], true);
+                              setTransferCandidates((current) =>
+                                current.filter((c) => c.outId !== candidate.outId || c.inId !== candidate.inId),
+                              );
+                              setToast(`${res.markedTransactions} transações marcadas como transferência interna.`);
+                            } catch {
+                              setToast("Erro ao marcar transferência.");
+                            } finally {
+                              setMarkingTransfer(null);
+                            }
+                          }}
+                        >
+                          {isMarking ? "…" : "É transferência minha"}
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.ghostButton}
+                          disabled={isMarking}
+                          onClick={() =>
+                            setTransferCandidates((current) =>
+                              current.filter((c) => c.outId !== candidate.outId || c.inId !== candidate.inId),
+                            )
+                          }
+                        >
+                          Ignorar
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
         </div>
       </div>
-    </main>
+    </div>
   );
 }
