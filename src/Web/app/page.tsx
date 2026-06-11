@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { KPICard } from "./components/KPICard";
 import { CategorySpendChart } from "./components/CategorySpendChart";
 import { MonthlyTrendChart } from "./components/MonthlyTrendChart";
@@ -25,6 +25,8 @@ export default function HomePage() {
   const [transactionDateRangeMonths, setTransactionDateRangeMonths] = useState(() =>
     getDateRangeMonths(null, undefined)
   );
+  const [transactionRangeOverride, setTransactionRangeOverride] = useState<string | null>(null);
+  const [trendRangeMonths, setTrendRangeMonths] = useState(() => getDateRangeMonths(null, "1y"));
   const [selectedAccount, setSelectedAccount] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
   const [search, setSearch] = useState("");
@@ -33,12 +35,14 @@ export default function HomePage() {
   const [accounts, setAccounts] = useState<AccountBalance[]>([]);
   const [categories, setCategories] = useState<Array<{ id: number; name: string }>>([]);
   const [spending, setSpending] = useState<CategorySpend[]>([]);
+  const [monthTotals, setMonthTotals] = useState<{ credits: number; debits: number }>({ credits: 0, debits: 0 });
   const [monthTransactions, setMonthTransactions] = useState<DashboardTransaction[]>([]);
   const [transactions, setTransactions] = useState<DashboardTransaction[]>([]);
   const [monthlyTrend, setMonthlyTrend] = useState<MonthlyTrendData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<{ id: number; merchant: string } | null>(null);
+  const transactionsSectionRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,12 +52,11 @@ export default function HomePage() {
         setError(null);
         setLoading(true);
 
-        const [accountsResponse, spendingResponse, monthTransactionsResponse, categoriesResponse, trendResponse] = await Promise.all([
+        const [accountsResponse, spendingResponse, monthTransactionsResponse, categoriesResponse] = await Promise.all([
           getAccounts(),
           getSpendingByCategory(selectedMonth),
           getTransactions({ month: selectedMonth }),
           getCategories(),
-          getMonthlyTrend(),
         ]);
 
         if (cancelled) {
@@ -62,9 +65,9 @@ export default function HomePage() {
 
         setAccounts(accountsResponse);
         setSpending(spendingResponse.categories);
+        setMonthTotals(spendingResponse.totals ?? { credits: 0, debits: 0 });
         setMonthTransactions(monthTransactionsResponse);
         setCategories(categoriesResponse);
-        setMonthlyTrend(trendResponse);
       } catch (loadError) {
         if (!cancelled) {
           setError(loadError instanceof Error ? loadError.message : "Failed to load dashboard");
@@ -82,6 +85,31 @@ export default function HomePage() {
       cancelled = true;
     };
   }, [selectedMonth]);
+
+  // Evolução Mensal tem filtro de período próprio
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadTrend() {
+      try {
+        const range = getDateRangeFromMonths(trendRangeMonths);
+        const response = await getMonthlyTrend(range ?? undefined);
+        if (!cancelled) {
+          setMonthlyTrend(response);
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to load monthly trend");
+        }
+      }
+    }
+
+    void loadTrend();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [trendRangeMonths]);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,9 +168,30 @@ export default function HomePage() {
     [accounts],
   );
 
-  const totalSpent = spending.reduce((sum, item) => sum + item.total, 0);
   const totalBalance = accounts.reduce((sum, acc) => sum + acc.balance, 0);
   const preferredCurrency = accounts[0]?.currency ?? "EUR";
+  const monthNet = monthTotals.credits - monthTotals.debits;
+
+  const formatCurrency = (value: number) =>
+    value.toLocaleString("pt-PT", {
+      style: "currency",
+      currency: preferredCurrency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    });
+
+  // Clicar numa categoria do gráfico filtra a tabela de transações para esse mês + categoria
+  const handleCategoryClick = (category: string) => {
+    if (selectedCategory === category) {
+      setSelectedCategory("");
+      return;
+    }
+
+    setSelectedCategory(category);
+    setTransactionDateRangeMonths([selectedMonth]);
+    setTransactionRangeOverride(formatMonthLabel(selectedMonth));
+    transactionsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   if (loading) {
     return (
@@ -228,74 +277,57 @@ export default function HomePage() {
                 Visão consolidada de contas, gastos e transações.
               </p>
             </div>
-            <div className="flex gap-4 items-end">
-              <div>
-                <label style={{ color: "var(--text-tertiary)" }} className="block text-xs font-medium mb-2">
-                  KPI / Gráficos
-                </label>
-                <select
-                  value={selectedMonth}
-                  onChange={(event) => setSelectedMonth(event.target.value)}
-                  className="px-4 py-2 rounded-lg border text-sm font-medium transition-colors"
-                  style={{
-                    backgroundColor: "var(--bg-secondary)",
-                    borderColor: "var(--border)",
-                    color: "var(--text-primary)",
-                  }}
-                  aria-label="Selecionar mês para KPI"
-                >
-                  {getAllAvailableMonths().map((month) => (
-                    <option key={month} value={month}>
-                      {formatMonthLabel(month)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label style={{ color: "var(--text-tertiary)" }} className="block text-xs font-medium mb-2">
-                  Transações
-                </label>
-                <DateRangeSelector
-                  onMonthsChange={setTransactionDateRangeMonths}
-                />
-              </div>
+            <div>
+              <label style={{ color: "var(--text-tertiary)" }} className="block text-xs font-medium mb-2">
+                Mês em análise
+              </label>
+              <select
+                value={selectedMonth}
+                onChange={(event) => setSelectedMonth(event.target.value)}
+                className="px-4 py-2 rounded-lg border text-sm font-medium transition-colors"
+                style={{
+                  backgroundColor: "var(--bg-secondary)",
+                  borderColor: "var(--border)",
+                  color: "var(--text-primary)",
+                }}
+                aria-label="Selecionar mês em análise"
+              >
+                {getAllAvailableMonths().map((month) => (
+                  <option key={month} value={month}>
+                    {formatMonthLabel(month)}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </div>
 
-        {/* KPI Cards */}
+        {/* KPI Cards — dados reais do mês em análise */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <KPICard
             label="Saldo Total"
-            value={totalBalance.toLocaleString("pt-PT", {
-              style: "currency",
-              currency: preferredCurrency,
-              minimumFractionDigits: 0,
-              maximumFractionDigits: 0,
-            })}
-            trend={{ direction: "up", percentage: 12 }}
+            value={formatCurrency(totalBalance)}
             icon="💳"
           />
           <KPICard
+            label="Receitas do Mês"
+            value={<span style={{ color: "var(--success)" }}>{formatCurrency(monthTotals.credits)}</span>}
+            icon="📈"
+          />
+          <KPICard
             label="Gastos do Mês"
-            value={totalSpent.toLocaleString("pt-PT", {
-              style: "currency",
-              currency: preferredCurrency,
-              minimumFractionDigits: 0,
-              maximumFractionDigits: 0,
-            })}
-            trend={{ direction: "down", percentage: 8 }}
+            value={<span style={{ color: "var(--error)" }}>{formatCurrency(monthTotals.debits)}</span>}
             icon="💸"
           />
           <KPICard
-            label="Categorias Ativas"
-            value={availableCategories.length}
-            icon="📊"
-          />
-          <KPICard
-            label="Transações"
-            value={monthTransactions.length}
-            icon="📋"
+            label="Resultado do Mês"
+            value={
+              <span style={{ color: monthNet >= 0 ? "var(--success)" : "var(--error)" }}>
+                {monthNet >= 0 ? "+" : ""}
+                {formatCurrency(monthNet)}
+              </span>
+            }
+            icon="⚖️"
           />
         </div>
 
@@ -303,23 +335,47 @@ export default function HomePage() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
           <MonthlyTrendChart
             data={monthlyTrend}
+            toolbar={
+              <DateRangeSelector
+                initialPreset="1y"
+                onMonthsChange={setTrendRangeMonths}
+              />
+            }
           />
-          <CategorySpendChart categories={spending} />
+          <CategorySpendChart
+            categories={spending}
+            selectedCategory={selectedCategory || undefined}
+            onCategoryClick={handleCategoryClick}
+          />
         </div>
 
         {/* Transactions Table */}
-        <TransactionTablePremium
-          transactions={transactions}
-          search={search}
-          onSearchChange={setSearch}
-          selectedCategory={selectedCategory}
-          onCategoryChange={setSelectedCategory}
-          selectedAccount={selectedAccount}
-          onAccountChange={setSelectedAccount}
-          categories={availableCategories}
-          accounts={accountOptions}
-          onEditCategory={(txn) => setEditingTransaction({ id: txn.id, merchant: txn.normalizedMerchant || txn.rawDescription })}
-        />
+        <div ref={transactionsSectionRef} className="scroll-mt-6">
+          <div className="flex items-center justify-between mb-3">
+            <h2 style={{ color: "var(--text-primary)", margin: 0 }} className="text-lg font-semibold">
+              Transações
+            </h2>
+            <DateRangeSelector
+              onMonthsChange={(months) => {
+                setTransactionRangeOverride(null);
+                setTransactionDateRangeMonths(months);
+              }}
+              overrideLabel={transactionRangeOverride ?? undefined}
+            />
+          </div>
+          <TransactionTablePremium
+            transactions={transactions}
+            search={search}
+            onSearchChange={setSearch}
+            selectedCategory={selectedCategory}
+            onCategoryChange={setSelectedCategory}
+            selectedAccount={selectedAccount}
+            onAccountChange={setSelectedAccount}
+            categories={availableCategories}
+            accounts={accountOptions}
+            onEditCategory={(txn) => setEditingTransaction({ id: txn.id, merchant: txn.normalizedMerchant || txn.rawDescription })}
+          />
+        </div>
 
         {/* Edit Category Modal */}
         {editingTransaction && (

@@ -3,14 +3,19 @@
 import { useState } from "react";
 import { getDateRangeMonths } from "../lib/format";
 
+export type DateRangePreset = "1m" | "3m" | "6m" | "1y" | "all" | "custom";
+
+type Preset = DateRangePreset;
+
 type Props = {
   onMonthsChange: (months: string[]) => void;
+  initialPreset?: Preset;
+  /** When set, shown instead of the preset label (e.g. a month forced by clicking a category). */
+  overrideLabel?: string;
 };
 
-type Preset = "1m" | "3m" | "6m" | "1y" | "all" | "custom";
-
-export function DateRangeSelector({ onMonthsChange }: Props) {
-  const [preset, setPreset] = useState<Preset>("1m");
+export function DateRangeSelector({ onMonthsChange, initialPreset = "1m", overrideLabel }: Props) {
+  const [preset, setPreset] = useState<Preset>(initialPreset);
   const [customDays, setCustomDays] = useState(30);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -52,7 +57,7 @@ export function DateRangeSelector({ onMonthsChange }: Props) {
         }}
         aria-label="Selecionar período"
       >
-        {getLabel()}
+        {overrideLabel ?? getLabel()}
       </button>
 
       {isOpen && (
