@@ -10,9 +10,9 @@ public class LlmCategorizationServiceTests
     private static readonly string[] CanonicalCategories = ["Restaurantes", "Transporte"];
 
     [Fact]
-    public async Task CategorizeAsync_HighConfidence_ReturnsCategory()
+    public async Task CategorizeAsync_Anthropic_HighConfidence_ReturnsCategory()
     {
-        using var scope = new AnthropicApiKeyScope("test-key");
+        using var scope = new LlmApiKeyScope(anthropicKey: "test-key");
         using var client = CreateHttpClient("""
             {
               "content": [
@@ -37,9 +37,9 @@ public class LlmCategorizationServiceTests
     }
 
     [Fact]
-    public async Task CategorizeAsync_LowConfidence_ReturnsResultWithLowScore()
+    public async Task CategorizeAsync_Anthropic_RuleSuggestion_ReturnsResultWithSuggestion()
     {
-        using var scope = new AnthropicApiKeyScope("test-key");
+        using var scope = new LlmApiKeyScope(anthropicKey: "test-key");
         using var client = CreateHttpClient("""
             {
               "content": [
@@ -62,13 +62,10 @@ public class LlmCategorizationServiceTests
     }
 
     [Fact]
-    public async Task CategorizeAsync_ApiFailure_ReturnsEmptyResult()
+    public async Task CategorizeAsync_Anthropic_ApiFailure_ReturnsEmptyResult()
     {
-        using var scope = new AnthropicApiKeyScope("test-key");
-        using var client = new HttpClient(new ThrowingHandler())
-        {
-            BaseAddress = new Uri("https://api.anthropic.com/")
-        };
+        using var scope = new LlmApiKeyScope(anthropicKey: "test-key");
+        using var client = new HttpClient(new ThrowingHandler());
         var service = new LlmCategorizationService(client, NullLogger<LlmCategorizationService>.Instance);
 
         var result = await service.CategorizeAsync(
@@ -79,9 +76,9 @@ public class LlmCategorizationServiceTests
     }
 
     [Fact]
-    public async Task CategorizeAsync_MalformedJson_ReturnsEmptyResult()
+    public async Task CategorizeAsync_Anthropic_MalformedJson_ReturnsEmptyResult()
     {
-        using var scope = new AnthropicApiKeyScope("test-key");
+        using var scope = new LlmApiKeyScope(anthropicKey: "test-key");
         using var client = CreateHttpClient("""
             {
               "content": [
@@ -102,13 +99,101 @@ public class LlmCategorizationServiceTests
     }
 
     [Fact]
-    public async Task CategorizeAsync_WithoutApiKey_ReturnsEmptyResultWithoutCallingApi()
+    public async Task CategorizeAsync_OpenAi_HighConfidence_ReturnsCategory()
     {
-        using var scope = new AnthropicApiKeyScope(null);
-        using var client = new HttpClient(new ThrowingHandler())
-        {
-            BaseAddress = new Uri("https://api.anthropic.com/")
-        };
+        using var scope = new LlmApiKeyScope(openAiKey: "test-key");
+        using var client = CreateHttpClient("""
+            {
+              "choices": [
+                {
+                  "message": {
+                    "content": "{\"results\":[{\"transaction_id\":1,\"category\":\"Transporte\",\"confidence\":0.95,\"rule_suggestion\":null}]}"
+                  }
+                }
+              ]
+            }
+            """);
+        var service = new LlmCategorizationService(client, NullLogger<LlmCategorizationService>.Instance);
+
+        var result = await service.CategorizeAsync(
+            [new LlmCategorizationInput(1, "Uber", "Uber *trip")],
+            CanonicalCategories);
+
+        var item = Assert.Single(result);
+        Assert.Equal(1, item.Key);
+        Assert.Equal("Transporte", item.Value.Category);
+        Assert.Equal(0.95, item.Value.Confidence);
+        Assert.Null(item.Value.Suggestion);
+    }
+
+    [Fact]
+    public async Task CategorizeAsync_OpenAi_RuleSuggestion_ReturnsResultWithSuggestion()
+    {
+        using var scope = new LlmApiKeyScope(openAiKey: "test-key");
+        using var client = CreateHttpClient("""
+            {
+              "choices": [
+                {
+                  "message": {
+                    "content": "{\"results\":[{\"transaction_id\":1,\"category\":\"Transporte\",\"confidence\":0.88,\"rule_suggestion\":{\"pattern\":\"Uber\",\"match_type\":\"contains\"}}]}"
+                  }
+                }
+              ]
+            }
+            """);
+        var service = new LlmCategorizationService(client, NullLogger<LlmCategorizationService>.Instance);
+
+        var result = await service.CategorizeAsync(
+            [new LlmCategorizationInput(1, "Uber", "Uber *trip")],
+            CanonicalCategories);
+
+        var item = Assert.Single(result).Value;
+        Assert.Equal(0.88, item.Confidence);
+        Assert.Equal(new LlmRuleSuggestion("Uber", "contains"), item.Suggestion);
+    }
+
+    [Fact]
+    public async Task CategorizeAsync_OpenAi_ApiFailure_ReturnsEmptyResult()
+    {
+        using var scope = new LlmApiKeyScope(openAiKey: "test-key");
+        using var client = new HttpClient(new ThrowingHandler());
+        var service = new LlmCategorizationService(client, NullLogger<LlmCategorizationService>.Instance);
+
+        var result = await service.CategorizeAsync(
+            [new LlmCategorizationInput(1, "Uber", "Uber *trip")],
+            CanonicalCategories);
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public async Task CategorizeAsync_OpenAiPreferredOverAnthropic_WhenBothKeysSet()
+    {
+        using var scope = new LlmApiKeyScope(anthropicKey: "anthropic-key", openAiKey: "openai-key");
+        var capturedUri = (Uri?)null;
+        using var client = new HttpClient(new CapturingHandler(
+            capturedRequest => capturedUri = capturedRequest.RequestUri,
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"choices":[{"message":{"content":"{\"results\":[]}"}}]}""",
+                    Encoding.UTF8, "application/json")
+            }));
+        var service = new LlmCategorizationService(client, NullLogger<LlmCategorizationService>.Instance);
+
+        await service.CategorizeAsync(
+            [new LlmCategorizationInput(0, "X", "X")],
+            CanonicalCategories);
+
+        Assert.NotNull(capturedUri);
+        Assert.Contains("openai.com", capturedUri!.Host);
+    }
+
+    [Fact]
+    public async Task CategorizeAsync_WithoutAnyApiKey_ReturnsEmptyResultWithoutCallingApi()
+    {
+        using var scope = new LlmApiKeyScope();
+        using var client = new HttpClient(new ThrowingHandler());
         var service = new LlmCategorizationService(client, NullLogger<LlmCategorizationService>.Instance);
 
         var result = await service.CategorizeAsync(
@@ -122,10 +207,7 @@ public class LlmCategorizationServiceTests
         new(new StubHandler(new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(content, Encoding.UTF8, "application/json")
-        }))
-        {
-            BaseAddress = new Uri("https://api.anthropic.com/")
-        };
+        }));
 
     private sealed class StubHandler(HttpResponseMessage response) : HttpMessageHandler
     {
@@ -143,16 +225,34 @@ public class LlmCategorizationServiceTests
             throw new HttpRequestException("boom");
     }
 
-    private sealed class AnthropicApiKeyScope : IDisposable
+    private sealed class CapturingHandler(
+        Action<HttpRequestMessage> capture,
+        HttpResponseMessage response) : HttpMessageHandler
     {
-        private readonly string? _previousValue = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
-
-        public AnthropicApiKeyScope(string? value)
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
         {
-            Environment.SetEnvironmentVariable("ANTHROPIC_API_KEY", value);
+            capture(request);
+            return Task.FromResult(response);
+        }
+    }
+
+    private sealed class LlmApiKeyScope : IDisposable
+    {
+        private readonly string? _previousAnthropic = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
+        private readonly string? _previousOpenAi = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+
+        public LlmApiKeyScope(string? anthropicKey = null, string? openAiKey = null)
+        {
+            Environment.SetEnvironmentVariable("ANTHROPIC_API_KEY", anthropicKey);
+            Environment.SetEnvironmentVariable("OPENAI_API_KEY", openAiKey);
         }
 
-        public void Dispose() =>
-            Environment.SetEnvironmentVariable("ANTHROPIC_API_KEY", _previousValue);
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable("ANTHROPIC_API_KEY", _previousAnthropic);
+            Environment.SetEnvironmentVariable("OPENAI_API_KEY", _previousOpenAi);
+        }
     }
 }

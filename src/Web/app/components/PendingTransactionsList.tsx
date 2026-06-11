@@ -1,14 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { Category, ReviewTransaction } from "../lib/api";
 import { patchTransactionCategory } from "../lib/api";
+import { CategorySelectWithCreate } from "./CategorySelectWithCreate";
 import styles from "../review/review.module.css";
 
 type PendingTransactionsListProps = {
   transactions: ReviewTransaction[];
   categories: Category[];
   onResolved: (transactionId: number) => void;
+  onCategoryCreated: (category: Category) => void;
   onToast: (message: string) => void;
 };
 
@@ -18,29 +20,24 @@ export function PendingTransactionsList({
   transactions,
   categories,
   onResolved,
+  onCategoryCreated,
   onToast,
 }: PendingTransactionsListProps) {
-  const [selectedCategories, setSelectedCategories] = useState<Record<number, string>>({});
+  const [selectedCategories, setSelectedCategories] = useState<Record<number, number>>({});
   const [promptRowId, setPromptRowId] = useState<number | null>(null);
   const [ruleFormRowId, setRuleFormRowId] = useState<number | null>(null);
   const [ruleDrafts, setRuleDrafts] = useState<Record<number, { pattern: string; matchType: MatchType }>>({});
   const [savingRowId, setSavingRowId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const categoryOptions = useMemo(
-    () => categories.map((category) => ({ value: String(category.id), label: category.name })),
-    [categories],
-  );
-
   async function saveCategory(
     transaction: ReviewTransaction,
     createRule: boolean,
     draft?: { pattern: string; matchType: MatchType },
   ) {
-    const selectedValue = selectedCategories[transaction.id] ?? String(transaction.categoryCanonicalId ?? "");
-    const categoryId = Number(selectedValue);
+    const categoryId = selectedCategories[transaction.id] ?? transaction.categoryCanonicalId;
 
-    if (!Number.isInteger(categoryId)) {
+    if (!categoryId) {
       setError("Selecione uma categoria antes de guardar.");
       return;
     }
@@ -70,6 +67,12 @@ export function PendingTransactionsList({
     }
   }
 
+  const handleCategoryCreated = (transactionId: number, newCategory: Category) => {
+    onCategoryCreated(newCategory);
+    setSelectedCategories((current) => ({ ...current, [transactionId]: newCategory.id }));
+    onToast(`Categoria "${newCategory.name}" criada.`);
+  };
+
   return (
     <>
       {error ? <div className={styles.errorBox}>{error}</div> : null}
@@ -92,9 +95,9 @@ export function PendingTransactionsList({
             <tbody>
               {transactions.map((transaction) => {
                 const selectedValue =
-                  selectedCategories[transaction.id] ?? String(transaction.categoryCanonicalId ?? "");
+                  selectedCategories[transaction.id] ?? transaction.categoryCanonicalId;
                 const hasChange =
-                  selectedValue !== String(transaction.categoryCanonicalId ?? "") && selectedValue !== "";
+                  selectedValue !== (transaction.categoryCanonicalId ?? 0) && selectedValue;
                 const isSaving = savingRowId === transaction.id;
                 const merchantLabel = transaction.normalizedMerchant ?? transaction.rawDescription;
                 const draft = ruleDrafts[transaction.id] ?? {
@@ -116,25 +119,19 @@ export function PendingTransactionsList({
                       {formatCurrency(transaction.amount, transaction.currency)}
                     </td>
                     <td>
-                      <select
-                        className={styles.select}
-                        value={selectedValue}
-                        onChange={(event) =>
+                      <CategorySelectWithCreate
+                        categories={categories}
+                        selectedId={selectedValue ? Number(selectedValue) : undefined}
+                        onChange={(categoryId) => {
                           setSelectedCategories((current) => ({
                             ...current,
-                            [transaction.id]: event.target.value,
-                          }))
-                        }
+                            [transaction.id]: categoryId,
+                          }));
+                        }}
+                        onCategoryCreated={(newCategory) => handleCategoryCreated(transaction.id, newCategory)}
                         disabled={isSaving}
-                        aria-label={`Categoria para transacao ${transaction.id}`}
-                      >
-                        <option value="">Selecionar categoria</option>
-                        {categoryOptions.map((category) => (
-                          <option key={category.value} value={category.value}>
-                            {category.label}
-                          </option>
-                        ))}
-                      </select>
+                        className={styles.select}
+                      />
                     </td>
                     <td>
                       <div className={styles.actions}>

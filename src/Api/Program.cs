@@ -24,10 +24,7 @@ builder.Services.AddHttpClient<AnomalyExplainer>(client =>
 {
     client.BaseAddress = new Uri("https://api.anthropic.com/");
 });
-builder.Services.AddHttpClient<ILlmCategorizationService, LlmCategorizationService>(client =>
-{
-    client.BaseAddress = new Uri("https://api.anthropic.com/");
-});
+builder.Services.AddHttpClient<ILlmCategorizationService, LlmCategorizationService>();
 builder.Services.AddHttpClient<IMonthlyReportService, MonthlyReportService>(client =>
 {
     client.BaseAddress = new Uri("https://api.anthropic.com/");
@@ -42,9 +39,45 @@ Program.RunMigrations(connectionString);
 
 var app = builder.Build();
 app.UseCors();
-if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")))
+
+// Request-level instrumentation: log start, end, status, duration and aborts of every request
+app.Use(async (context, next) =>
 {
-    app.Logger.LogInformation("LLM categorization is disabled because ANTHROPIC_API_KEY is not set.");
+    var requestId = Guid.NewGuid().ToString("N")[..8];
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    app.Logger.LogInformation(
+        "REQ[{RequestId}] {Method} {Path} started (content-length={Length})",
+        requestId, context.Request.Method, context.Request.Path,
+        context.Request.ContentLength?.ToString(CultureInfo.InvariantCulture) ?? "?");
+    try
+    {
+        await next();
+        app.Logger.LogInformation(
+            "REQ[{RequestId}] {Method} {Path} finished status={Status} in {Elapsed}ms aborted={Aborted}",
+            requestId, context.Request.Method, context.Request.Path,
+            context.Response.StatusCode, sw.ElapsedMilliseconds,
+            context.RequestAborted.IsCancellationRequested);
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex,
+            "REQ[{RequestId}] {Method} {Path} THREW after {Elapsed}ms aborted={Aborted}",
+            requestId, context.Request.Method, context.Request.Path,
+            sw.ElapsedMilliseconds, context.RequestAborted.IsCancellationRequested);
+        throw;
+    }
+});
+var hasAnthropicKey = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY"));
+var hasOpenAiKey = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENAI_API_KEY"));
+if (!hasAnthropicKey && !hasOpenAiKey)
+{
+    app.Logger.LogInformation("LLM categorization is disabled because neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set.");
+}
+else
+{
+    var provider = hasOpenAiKey ? "OpenAI" : "Anthropic";
+    var model = Environment.GetEnvironmentVariable("LLM_MODEL") ?? (hasOpenAiKey ? "gpt-4o-mini" : "claude-haiku-4-5-20251001");
+    app.Logger.LogInformation("LLM categorization enabled using {Provider} ({Model}).", provider, model);
 }
 
 var parserRegistry = new ParserRegistry();
@@ -108,9 +141,22 @@ app.MapGet(
     });
 
 app.MapGet(
+    "/api/monthly-trend",
+    async (CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var trend = await Program.LoadMonthlyTrendAsync(connection, cancellationToken);
+        return Results.Ok(trend);
+    });
+
+app.MapGet(
     "/api/transactions",
     async (
         string? month,
+        string? fromDate,
+        string? toDate,
         string? account,
         string? category,
         string? search,
@@ -119,6 +165,26 @@ app.MapGet(
         if (!string.IsNullOrWhiteSpace(month) && !AnomalyDetector.TryParseMonth(month, out _))
         {
             return Results.BadRequest(new { error = "Expected month in YYYY-MM format." });
+        }
+
+        DateOnly? parsedFromDate = null;
+        if (!string.IsNullOrWhiteSpace(fromDate))
+        {
+            if (!DateOnly.TryParse(fromDate, out var date))
+            {
+                return Results.BadRequest(new { error = "Expected fromDate in YYYY-MM-DD format." });
+            }
+            parsedFromDate = date;
+        }
+
+        DateOnly? parsedToDate = null;
+        if (!string.IsNullOrWhiteSpace(toDate))
+        {
+            if (!DateOnly.TryParse(toDate, out var date))
+            {
+                return Results.BadRequest(new { error = "Expected toDate in YYYY-MM-DD format." });
+            }
+            parsedToDate = date;
         }
 
         int? accountId = null;
@@ -138,6 +204,8 @@ app.MapGet(
         var transactions = await Program.LoadDashboardTransactionsAsync(
             connection,
             month,
+            parsedFromDate,
+            parsedToDate,
             accountId,
             category,
             search,
@@ -177,6 +245,180 @@ app.MapGet(
 
         var categories = await Program.LoadCategoriesAsync(connection, cancellationToken);
         return Results.Ok(categories);
+    });
+
+app.MapGet(
+    "/api/rules",
+    async (CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT rules.id, rules.pattern, rules.match_type, rules.priority,
+                   categories.id AS category_id, categories.name AS category_name
+            FROM rules
+            JOIN categories ON categories.id = rules.category_canonical_id
+            ORDER BY rules.priority DESC, rules.pattern ASC;
+            """;
+
+        var rules = new List<object>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rules.Add(new
+            {
+                id = reader.GetInt32(0),
+                pattern = reader.GetString(1),
+                matchType = reader.GetString(2),
+                priority = reader.GetInt32(3),
+                categoryId = reader.GetInt32(4),
+                categoryName = reader.GetString(5),
+            });
+        }
+
+        return Results.Ok(rules);
+    });
+
+app.MapPost(
+    "/api/rules",
+    async (CreateRuleRequest request, RuleManager ruleManager, CancellationToken cancellationToken) =>
+    {
+        if (string.IsNullOrWhiteSpace(request.Pattern))
+        {
+            return Results.BadRequest(new { error = "O padrão não pode ser vazio." });
+        }
+
+        if (!Program.IsSupportedMatchType(request.MatchType))
+        {
+            return Results.BadRequest(new { error = "Tipo de correspondência inválido." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        if (!await Program.CategoryExistsAsync(connection, transaction, request.CategoryId, cancellationToken))
+        {
+            return Results.NotFound(new { error = $"Categoria {request.CategoryId} não encontrada." });
+        }
+
+        var result = await ruleManager.CreateRuleAndRecategorizeAsync(
+            connection, transaction, request.Pattern.Trim(), request.MatchType, request.CategoryId, cancellationToken);
+
+        if (!result.Created)
+        {
+            return Results.Conflict(new { error = "Já existe uma regra com este padrão e tipo." });
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return Results.Ok(new { recategorizedTransactions = result.RecategorizedTransactions });
+    });
+
+app.MapPatch(
+    "/api/rules/{id:int}",
+    async (int id, UpdateRuleRequest request, RuleManager ruleManager, CancellationToken cancellationToken) =>
+    {
+        if (string.IsNullOrWhiteSpace(request.Pattern))
+        {
+            return Results.BadRequest(new { error = "O padrão não pode ser vazio." });
+        }
+
+        if (!Program.IsSupportedMatchType(request.MatchType))
+        {
+            return Results.BadRequest(new { error = "Tipo de correspondência inválido." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        if (!await Program.CategoryExistsAsync(connection, transaction, request.CategoryId, cancellationToken))
+        {
+            return Results.NotFound(new { error = $"Categoria {request.CategoryId} não encontrada." });
+        }
+
+        await using var updateCommand = connection.CreateCommand();
+        updateCommand.Transaction = transaction;
+        updateCommand.CommandText = """
+            UPDATE rules
+            SET pattern = @pattern, match_type = @matchType,
+                category_canonical_id = @categoryId, priority = @priority
+            WHERE id = @id;
+            """;
+        updateCommand.Parameters.AddWithValue("pattern", request.Pattern.Trim());
+        updateCommand.Parameters.AddWithValue("matchType", request.MatchType);
+        updateCommand.Parameters.AddWithValue("categoryId", request.CategoryId);
+        updateCommand.Parameters.AddWithValue("priority", request.Priority);
+        updateCommand.Parameters.AddWithValue("id", id);
+
+        var affected = await updateCommand.ExecuteNonQueryAsync(cancellationToken);
+        if (affected == 0)
+        {
+            return Results.NotFound(new { error = $"Regra {id} não encontrada." });
+        }
+
+        var recategorized = await ruleManager.RecategorizeByRuleAsync(
+            connection, transaction, request.Pattern.Trim(), request.MatchType, request.CategoryId, cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
+        return Results.Ok(new { recategorizedTransactions = recategorized });
+    });
+
+app.MapDelete(
+    "/api/rules/{id:int}",
+    async (int id, CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM rules WHERE id = @id;";
+        command.Parameters.AddWithValue("id", id);
+
+        var affected = await command.ExecuteNonQueryAsync(cancellationToken);
+        return affected == 0
+            ? Results.NotFound(new { error = $"Regra {id} não encontrada." })
+            : Results.Ok();
+    });
+
+app.MapPost(
+    "/api/categories",
+    async (CreateCategoryRequest request, CancellationToken cancellationToken) =>
+    {
+        var name = request.Name?.Trim();
+        if (string.IsNullOrEmpty(name))
+        {
+            return Results.BadRequest(new { error = "O nome da categoria não pode ser vazio." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO categories (name, is_system)
+            VALUES (@name, false)
+            ON CONFLICT DO NOTHING
+            RETURNING id, name;
+            """;
+        command.Parameters.AddWithValue("name", name);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return Results.Ok(new { id = reader.GetInt32(0), name = reader.GetString(1) });
+        }
+
+        // Name already exists — return the existing one
+        await reader.CloseAsync();
+        await using var selectCommand = connection.CreateCommand();
+        selectCommand.CommandText = "SELECT id, name FROM categories WHERE name = @name LIMIT 1;";
+        selectCommand.Parameters.AddWithValue("name", name);
+        await using var selectReader = await selectCommand.ExecuteReaderAsync(cancellationToken);
+        await selectReader.ReadAsync(cancellationToken);
+        return Results.Ok(new { id = selectReader.GetInt32(0), name = selectReader.GetString(1) });
     });
 
 app.MapPatch(
@@ -263,7 +505,7 @@ app.MapPatch(
 
 app.MapPost(
     "/api/review/rule-suggestions/{id:int}/approve",
-    async (int id, RuleManager ruleManager, CancellationToken cancellationToken) =>
+    async (int id, ApproveSuggestionRequest? request, RuleManager ruleManager, CancellationToken cancellationToken) =>
     {
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -279,25 +521,29 @@ app.MapPost(
             return Results.NotFound(new { error = $"Pending rule suggestion {id} was not found." });
         }
 
+        var pattern = request?.Pattern?.Trim() ?? suggestion.Pattern;
+        var matchType = request?.MatchType ?? suggestion.MatchType;
+        var categoryId = request?.CategoryId ?? suggestion.CategoryId;
+
+        if (string.IsNullOrWhiteSpace(pattern))
+        {
+            return Results.BadRequest(new { error = "O padrão não pode ser vazio." });
+        }
+
+        if (!Program.IsSupportedMatchType(matchType))
+        {
+            return Results.BadRequest(new { error = "Tipo de correspondência inválido." });
+        }
+
         var ruleResult = await ruleManager.CreateRuleAndRecategorizeAsync(
-            connection,
-            transaction,
-            suggestion.Pattern,
-            suggestion.MatchType,
-            suggestion.CategoryId,
-            cancellationToken);
+            connection, transaction, pattern, matchType, categoryId, cancellationToken);
+
         if (!ruleResult.Created)
         {
             return Results.Conflict(new { error = "A rule with the same pattern and match type already exists." });
         }
 
-        await Program.UpdateRuleSuggestionStatusAsync(
-            connection,
-            transaction,
-            id,
-            "approved",
-            cancellationToken);
-
+        await Program.UpdateRuleSuggestionStatusAsync(connection, transaction, id, "approved", cancellationToken);
         await transaction.CommitAsync(cancellationToken);
 
         return Results.Ok(new
@@ -329,6 +575,160 @@ app.MapPost(
 
         await transaction.CommitAsync(cancellationToken);
         return Results.Ok(new { suggestionId = id, status = "rejected" });
+    });
+
+app.MapGet(
+    "/api/review/rule-suggestions/{id:int}/preview",
+    async (int id, CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var suggestionCommand = connection.CreateCommand();
+        suggestionCommand.CommandText = """
+            SELECT rs.suggested_pattern, rs.suggested_match_type, rs.transaction_id
+            FROM rule_suggestions rs
+            WHERE rs.id = @id AND rs.status = 'pending';
+            """;
+        suggestionCommand.Parameters.AddWithValue("id", id);
+
+        await using var suggestionReader = await suggestionCommand.ExecuteReaderAsync(cancellationToken);
+        if (!await suggestionReader.ReadAsync(cancellationToken))
+        {
+            return Results.NotFound(new { error = "Sugestão não encontrada." });
+        }
+
+        var pattern = suggestionReader.GetString(0);
+        var matchType = suggestionReader.GetString(1);
+        var originTransactionId = suggestionReader.GetInt32(2);
+        await suggestionReader.CloseAsync();
+
+        await using var matchCommand = connection.CreateCommand();
+        matchCommand.Parameters.AddWithValue("pattern", pattern);
+
+        matchCommand.CommandText = matchType switch
+        {
+            "merchant_eq" => """
+                SELECT id, booking_date, normalized_merchant, raw_description, amount, direction, currency
+                FROM transactions
+                WHERE normalized_merchant IS NOT NULL AND normalized_merchant ILIKE @pattern
+                ORDER BY booking_date DESC LIMIT 50;
+                """,
+            "contains" => """
+                SELECT id, booking_date, normalized_merchant, raw_description, amount, direction, currency
+                FROM transactions
+                WHERE COALESCE(normalized_merchant, '') ILIKE '%' || @pattern || '%'
+                   OR raw_description ILIKE '%' || @pattern || '%'
+                ORDER BY booking_date DESC LIMIT 50;
+                """,
+            _ => """
+                SELECT id, booking_date, normalized_merchant, raw_description, amount, direction, currency
+                FROM transactions
+                WHERE COALESCE(normalized_merchant, raw_description) ~* @pattern
+                ORDER BY booking_date DESC LIMIT 50;
+                """
+        };
+
+        var matches = new List<object>();
+        await using var matchReader = await matchCommand.ExecuteReaderAsync(cancellationToken);
+        while (await matchReader.ReadAsync(cancellationToken))
+        {
+            matches.Add(new
+            {
+                id = matchReader.GetInt32(0),
+                bookingDate = DateOnly.FromDateTime(matchReader.GetDateTime(1)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                normalizedMerchant = matchReader.IsDBNull(2) ? null : matchReader.GetString(2),
+                rawDescription = matchReader.GetString(3),
+                amount = matchReader.GetDecimal(4),
+                direction = matchReader.GetString(5),
+                currency = matchReader.GetString(6),
+                isOrigin = matchReader.GetInt32(0) == originTransactionId,
+            });
+        }
+
+        return Results.Ok(new { pattern, matchType, matches });
+    });
+
+app.MapGet(
+    "/api/review/transfer-candidates",
+    async (CancellationToken cancellationToken) =>
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                a.id AS out_id, a.booking_date AS out_date, a.amount,
+                a.source AS out_source, oa.name AS out_account,
+                a.currency AS out_currency,
+                b.id AS in_id, b.booking_date AS in_date,
+                b.source AS in_source, ia.name AS in_account,
+                b.currency AS in_currency
+            FROM transactions a
+            JOIN transactions b ON
+                a.amount = b.amount
+                AND a.direction = 'OUT'
+                AND b.direction = 'IN'
+                AND a.source <> b.source
+                AND ABS(b.booking_date - a.booking_date) <= 3
+            JOIN accounts oa ON oa.id = a.account_id
+            JOIN accounts ia ON ia.id = b.account_id
+            WHERE a.is_own_transfer = false
+              AND b.is_own_transfer = false
+            ORDER BY a.booking_date DESC, a.amount DESC
+            LIMIT 100;
+            """;
+
+        var candidates = new List<object>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            candidates.Add(new
+            {
+                outId = reader.GetInt32(0),
+                outDate = DateOnly.FromDateTime(reader.GetDateTime(1)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                amount = reader.GetDecimal(2),
+                outSource = reader.GetString(3),
+                outAccount = reader.GetString(4),
+                outCurrency = reader.GetString(5),
+                inId = reader.GetInt32(6),
+                inDate = DateOnly.FromDateTime(reader.GetDateTime(7)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                inSource = reader.GetString(8),
+                inAccount = reader.GetString(9),
+                inCurrency = reader.GetString(10),
+            });
+        }
+
+        return Results.Ok(candidates);
+    });
+
+app.MapPost(
+    "/api/review/transfer-candidates/mark",
+    async (MarkTransferRequest request, CancellationToken cancellationToken) =>
+    {
+        if (request.TransactionIds is null || request.TransactionIds.Count == 0)
+        {
+            return Results.BadRequest(new { error = "Nenhuma transação especificada." });
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE transactions
+            SET is_own_transfer = @value
+            WHERE id = ANY(@ids);
+            """;
+        command.Parameters.AddWithValue("value", request.Mark);
+        command.Parameters.Add(new NpgsqlParameter("ids", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer)
+        {
+            Value = request.TransactionIds.ToArray()
+        });
+
+        var affected = await command.ExecuteNonQueryAsync(cancellationToken);
+        return Results.Ok(new { markedTransactions = affected });
     });
 
 app.MapGet(
@@ -442,6 +842,10 @@ app.MapPost("/api/imports", async (
         });
     }
 
+    var cancellationToken = context.RequestAborted;
+    var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+    var importSw = System.Diagnostics.Stopwatch.StartNew();
+
     StatementParseResult parsed;
     try
     {
@@ -449,49 +853,197 @@ app.MapPost("/api/imports", async (
         parsed = parser.Parse(stream);
     }
     catch (Exception exception) when (
-        exception is InvalidDataException or FormatException or CsvHelper.CsvHelperException)
+        exception is InvalidDataException or FormatException or CsvHelper.CsvHelperException
+            or ArgumentOutOfRangeException)
     {
+        logger.LogWarning(exception, "IMPORT[{FileName}] parse failed: {Message}", file.FileName, exception.Message);
         return Results.BadRequest(new { error = exception.Message });
     }
 
+    logger.LogInformation(
+        "IMPORT[{FileName}] parsed {Count} transactions (account={Account}) in {Elapsed}ms",
+        file.FileName, parsed.Transactions.Count, parsed.AccountIdentifier, importSw.ElapsedMilliseconds);
+
+    var confidenceThreshold = configuration.GetValue<double?>("Categorization:ConfidenceThreshold") ?? 0.85d;
+
+    // Phase 1: read-only pre-flight — check duplicates, evaluate rules, collect LLM inputs.
+    // Done outside a transaction so that the long LLM call doesn't hold an open tx.
+    IReadOnlyList<TransactionInsertCandidate> inserts;
+    IReadOnlyDictionary<string, int> canonicalCategories;
+    Dictionary<int, LlmCategorizationResult> llmResults;
+
+    try
+    {
+        await using var readConn = new NpgsqlConnection(connectionString);
+        await readConn.OpenAsync(cancellationToken);
+
+        var evaluator = await CategoryEvaluator.LoadAsync(readConn, null);
+        canonicalCategories = await Program.LoadCanonicalCategoriesAsync(readConn, null, cancellationToken);
+
+        var pendingLlmInputs = new List<LlmCategorizationInput>();
+        var insertList = new List<TransactionInsertCandidate>();
+        var seenWiseIds = new HashSet<string>(StringComparer.Ordinal);
+        var seenHashes = new HashSet<string>(StringComparer.Ordinal);
+
+        // We need a temporary accountId just for dedup-hash computation
+        // Use a dummy 0 — the real accountId is assigned later in the write transaction
+        var tempAccountId = 0;
+
+        foreach (var item in parsed.Transactions)
+        {
+            var dedupHash = source == "activobank" ? Program.ComputeDedupHash(tempAccountId, item) : null;
+
+            if (source == "wise")
+            {
+                var srcId = item.SourceTransactionId
+                    ?? throw new InvalidDataException("Wise transaction missing source transaction id.");
+                if (!seenWiseIds.Add(srcId)) continue;
+            }
+            else if (!seenHashes.Add(dedupHash!)) continue;
+
+            var categoryCanonicalId = evaluator.Evaluate(
+                item.CategorySource,
+                item.NormalizedMerchant,
+                item.RawDescription);
+
+            var llmCorrelationId = categoryCanonicalId is null ? insertList.Count : (int?)null;
+            if (llmCorrelationId is not null)
+            {
+                pendingLlmInputs.Add(new LlmCategorizationInput(
+                    llmCorrelationId.Value,
+                    item.NormalizedMerchant,
+                    item.RawDescription));
+            }
+
+            insertList.Add(new TransactionInsertCandidate(item, dedupHash, categoryCanonicalId, llmCorrelationId));
+        }
+
+        logger.LogInformation(
+            "IMPORT[{FileName}] pre-flight done: {Inserts} candidates, {LlmInputs} need LLM ({Elapsed}ms)",
+            file.FileName, insertList.Count, pendingLlmInputs.Count, importSw.ElapsedMilliseconds);
+
+        // LLM call happens here — connection already closed, no tx held open
+        llmResults = pendingLlmInputs.Count == 0
+            ? new Dictionary<int, LlmCategorizationResult>()
+            : new Dictionary<int, LlmCategorizationResult>(
+                await llmCategorizationService.CategorizeAsync(
+                    pendingLlmInputs,
+                    canonicalCategories.Keys.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
+                    cancellationToken));
+
+        logger.LogInformation(
+            "IMPORT[{FileName}] LLM phase done: {Results}/{Inputs} categorized ({Elapsed}ms)",
+            file.FileName, llmResults.Count, pendingLlmInputs.Count, importSw.ElapsedMilliseconds);
+
+        inserts = insertList;
+    }
+    catch (OperationCanceledException)
+    {
+        return Results.Json(new { error = "Request cancelled or timed out." }, statusCode: 499);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Pre-flight failed for file {FileName}", file.FileName);
+        return Results.Problem(detail: ex.Message, title: "Import pre-flight failed", statusCode: 500);
+    }
+
+    // Phase 2: write transaction — fast, no external calls
+    logger.LogInformation("IMPORT[{FileName}] write phase starting ({Elapsed}ms)", file.FileName, importSw.ElapsedMilliseconds);
+    await using var connection = new NpgsqlConnection(connectionString);
+    await connection.OpenAsync(cancellationToken);
+    await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+    try
+    {
+        var accountId = await Program.EnsureAccountAsync(
+            connection,
+            transaction,
+            source,
+            parsed.AccountIdentifier,
+            parsed.Transactions);
+        var batchId = await Program.CreateBatchAsync(
+            connection,
+            transaction,
+            source,
+            file.FileName,
+            parsed.Transactions.Count);
+        logger.LogInformation(
+            "IMPORT[{FileName}] accountId={AccountId} batchId={BatchId}, inserting {Count} candidates",
+            file.FileName, accountId, batchId, inserts.Count);
+        var summary = await Program.InsertTransactionsWithPrecomputedLlmAsync(
+            connection,
+            transaction,
+            source,
+            accountId,
+            batchId,
+            inserts,
+            llmResults,
+            canonicalCategories,
+            confidenceThreshold,
+            cancellationToken,
+            logger);
+
+        await transaction.CommitAsync(cancellationToken);
+
+        logger.LogInformation(
+            "IMPORT[{FileName}] DONE: imported={Imported} ignored={Ignored} total={Elapsed}ms",
+            file.FileName, summary.Imported, summary.Ignored, importSw.ElapsedMilliseconds);
+
+        return Results.Ok(new
+        {
+            summary.Imported,
+            summary.Ignored,
+            byStatus = summary.ByStatus,
+            source,
+            accountId,
+            batchId
+        });
+    }
+    catch (OperationCanceledException)
+    {
+        await transaction.RollbackAsync();
+        return Results.Json(new { error = "Request cancelled or timed out." }, statusCode: 499);
+    }
+    catch (Exception ex)
+    {
+        await transaction.RollbackAsync();
+        logger.LogError(ex, "Import write phase failed for file {FileName}", file.FileName);
+        return Results.Problem(detail: ex.Message, title: "Import failed", statusCode: 500);
+    }
+});
+
+app.MapPatch("/api/transactions/{id}", async (int id, UpdateTransactionCategoryRequest request, CancellationToken cancellationToken) =>
+{
+    if (request.CategoryId == 0) return Results.BadRequest(new { error = "CategoryId é obrigatório." });
+
+    await using var connection = new NpgsqlConnection(connectionString);
+    await connection.OpenAsync(cancellationToken);
+
+    await using var command = connection.CreateCommand();
+    command.CommandText = """
+        UPDATE transactions SET category_canonical_id = @catId WHERE id = @id;
+        """;
+    command.Parameters.AddWithValue("catId", request.CategoryId);
+    command.Parameters.AddWithValue("id", id);
+    var updated = await command.ExecuteNonQueryAsync(cancellationToken);
+
+    if (updated == 0) return Results.NotFound();
+
+    return Results.Ok(new { message = "Categoria atualizada.", transactionId = id, categoryId = request.CategoryId });
+});
+
+app.MapPost("/api/debug/reset", async () =>
+{
     await using var connection = new NpgsqlConnection(connectionString);
     await connection.OpenAsync();
-    await using var transaction = await connection.BeginTransactionAsync();
 
-    var accountId = await Program.EnsureAccountAsync(
-        connection,
-        transaction,
-        source,
-        parsed.AccountIdentifier,
-        parsed.Transactions);
-    var batchId = await Program.CreateBatchAsync(
-        connection,
-        transaction,
-        source,
-        file.FileName,
-        parsed.Transactions.Count);
-    var summary = await Program.InsertTransactionsAsync(
-        connection,
-        transaction,
-        source,
-        accountId,
-        batchId,
-        parsed.Transactions,
-        llmCategorizationService,
-        configuration.GetValue<double?>("Categorization:ConfidenceThreshold") ?? 0.85d,
-        context.RequestAborted);
+    await using var command = connection.CreateCommand();
+    command.CommandText = """
+        TRUNCATE rule_suggestions, transactions, import_batches, accounts RESTART IDENTITY CASCADE;
+        """;
+    await command.ExecuteNonQueryAsync();
 
-    await transaction.CommitAsync();
-
-    return Results.Ok(new
-    {
-        summary.Imported,
-        summary.Ignored,
-        byStatus = summary.ByStatus,
-        source,
-        accountId,
-        batchId
-    });
+    return Results.Ok(new { message = "Base de dados limpa com sucesso." });
 });
 
 app.Run();
@@ -636,6 +1188,50 @@ public partial class Program
                     canonicalCategories.Keys.OrderBy(name => name, StringComparer.Ordinal).ToArray(),
                     cancellationToken));
 
+        // Create any new categories the LLM proposed, deduplicating against existing ones (ILIKE)
+        var proposedNames = llmResults.Values
+            .Where(r => r.NewCategoryName is not null)
+            .Select(r => r.NewCategoryName!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var proposed in proposedNames)
+        {
+            if (canonicalCategories.Keys.Any(k => string.Equals(k, proposed, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            await using var catCmd = connection.CreateCommand();
+            catCmd.Transaction = transaction;
+            catCmd.CommandText = """
+                INSERT INTO categories (name, is_system)
+                VALUES (@name, false)
+                ON CONFLICT DO NOTHING
+                RETURNING id, name;
+                """;
+            catCmd.Parameters.AddWithValue("name", proposed);
+
+            await using var catReader = await catCmd.ExecuteReaderAsync(cancellationToken);
+            if (await catReader.ReadAsync(cancellationToken))
+            {
+                canonicalCategories[catReader.GetString(1)] = catReader.GetInt32(0);
+            }
+            else
+            {
+                await catReader.CloseAsync();
+                await using var selectCmd = connection.CreateCommand();
+                selectCmd.Transaction = transaction;
+                selectCmd.CommandText = "SELECT id, name FROM categories WHERE name ILIKE @name LIMIT 1;";
+                selectCmd.Parameters.AddWithValue("name", proposed);
+                await using var selReader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                if (await selReader.ReadAsync(cancellationToken))
+                {
+                    canonicalCategories[selReader.GetString(1)] = selReader.GetInt32(0);
+                }
+            }
+        }
+
         foreach (var insert in inserts)
         {
             var categoryCanonicalId = insert.CategoryCanonicalId;
@@ -644,10 +1240,29 @@ public partial class Program
                 llmResults.TryGetValue(insert.LlmCorrelationId.Value, out var resolved))
             {
                 llmResult = resolved;
+
+                // Use an existing category if confidence is high enough
                 if (resolved.Confidence >= confidenceThreshold &&
+                    resolved.Category is not null &&
                     canonicalCategories.TryGetValue(resolved.Category, out var resolvedCategoryId))
                 {
                     categoryCanonicalId = resolvedCategoryId;
+                }
+                // Use a newly-created category when LLM proposed one and it now exists
+                else if (resolved.NewCategoryName is not null &&
+                    canonicalCategories.TryGetValue(resolved.NewCategoryName, out var newCatId))
+                {
+                    categoryCanonicalId = newCatId;
+                }
+                else if (resolved.NewCategoryName is not null)
+                {
+                    // Try case-insensitive lookup in case key casing differs
+                    var match = canonicalCategories.Keys.FirstOrDefault(
+                        k => string.Equals(k, resolved.NewCategoryName, StringComparison.OrdinalIgnoreCase));
+                    if (match is not null)
+                    {
+                        categoryCanonicalId = canonicalCategories[match];
+                    }
                 }
             }
 
@@ -661,9 +1276,12 @@ public partial class Program
                 insert.DedupHash,
                 categoryCanonicalId);
 
+            var suggestionCategoryKey = llmResult?.Category
+                ?? llmResult?.NewCategoryName;
             if (llmResult?.Suggestion is not null &&
                 llmResult.Confidence < confidenceThreshold &&
-                canonicalCategories.TryGetValue(llmResult.Category, out var suggestionCategoryId))
+                suggestionCategoryKey is not null &&
+                canonicalCategories.TryGetValue(suggestionCategoryKey, out var suggestionCategoryId))
             {
                 await InsertRuleSuggestionAsync(
                     connection,
@@ -678,6 +1296,149 @@ public partial class Program
             imported++;
             byStatus[insert.Transaction.Status] = byStatus.GetValueOrDefault(insert.Transaction.Status) + 1;
         }
+
+        return new ImportSummary(imported, ignored, byStatus);
+    }
+
+    internal static async Task<ImportSummary> InsertTransactionsWithPrecomputedLlmAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        string source,
+        int accountId,
+        int batchId,
+        IReadOnlyList<TransactionInsertCandidate> inserts,
+        IReadOnlyDictionary<int, LlmCategorizationResult> llmResults,
+        IReadOnlyDictionary<string, int> canonicalCategoriesReadOnly,
+        double confidenceThreshold,
+        CancellationToken cancellationToken = default,
+        ILogger? logger = null)
+    {
+        var imported = 0;
+        var ignored = 0;
+        var byStatus = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        // Get up-to-date categories including any new ones added by LLM phase
+        var canonicalCategories = await Program.LoadCanonicalCategoriesAsync(connection, transaction, cancellationToken);
+
+        // Create any new categories the LLM proposed
+        var proposedNames = llmResults.Values
+            .Where(r => r.NewCategoryName is not null)
+            .Select(r => r.NewCategoryName!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (proposedNames.Count > 0)
+        {
+            logger?.LogInformation(
+                "PERSIST[batch={BatchId}] LLM proposed {Count} new categories: [{Names}]",
+                batchId, proposedNames.Count, string.Join(", ", proposedNames));
+        }
+
+        foreach (var proposed in proposedNames)
+        {
+            if (canonicalCategories.Keys.Any(k => string.Equals(k, proposed, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            await using var catCmd = connection.CreateCommand();
+            catCmd.Transaction = transaction;
+            catCmd.CommandText = """
+                INSERT INTO categories (name, is_system)
+                VALUES (@name, false)
+                ON CONFLICT DO NOTHING
+                RETURNING id, name;
+                """;
+            catCmd.Parameters.AddWithValue("name", proposed);
+
+            await using var catReader = await catCmd.ExecuteReaderAsync(cancellationToken);
+            if (await catReader.ReadAsync(cancellationToken))
+            {
+                canonicalCategories[catReader.GetString(1)] = catReader.GetInt32(0);
+            }
+            else
+            {
+                await catReader.CloseAsync();
+                await using var selectCmd = connection.CreateCommand();
+                selectCmd.Transaction = transaction;
+                selectCmd.CommandText = "SELECT id, name FROM categories WHERE name ILIKE @name LIMIT 1;";
+                selectCmd.Parameters.AddWithValue("name", proposed);
+                await using var selReader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+                if (await selReader.ReadAsync(cancellationToken))
+                    canonicalCategories[selReader.GetString(1)] = selReader.GetInt32(0);
+            }
+        }
+
+        // Recompute dedup hashes using the real accountId
+        var seenWiseIds = new HashSet<string>(StringComparer.Ordinal);
+        var seenHashes = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var insert in inserts)
+        {
+            // Re-check duplicates with real accountId
+            var realHash = source == "activobank" ? Program.ComputeDedupHash(accountId, insert.Transaction) : null;
+
+            if (source == "wise")
+            {
+                var srcId = insert.Transaction.SourceTransactionId ?? string.Empty;
+                if (!seenWiseIds.Add(srcId)) { ignored++; continue; }
+            }
+            else if (!seenHashes.Add(realHash!)) { ignored++; continue; }
+
+            if (await TransactionExistsAsync(connection, transaction, source, insert.Transaction, realHash))
+            {
+                ignored++;
+                continue;
+            }
+
+            var categoryCanonicalId = insert.CategoryCanonicalId;
+            LlmCategorizationResult? llmResult = null;
+
+            if (insert.LlmCorrelationId is not null &&
+                llmResults.TryGetValue(insert.LlmCorrelationId.Value, out var resolved))
+            {
+                llmResult = resolved;
+                if (resolved.Confidence >= confidenceThreshold &&
+                    resolved.Category is not null &&
+                    canonicalCategories.TryGetValue(resolved.Category, out var resolvedCategoryId))
+                {
+                    categoryCanonicalId = resolvedCategoryId;
+                }
+                else if (resolved.NewCategoryName is not null &&
+                    canonicalCategories.TryGetValue(resolved.NewCategoryName, out var newCatId))
+                {
+                    categoryCanonicalId = newCatId;
+                }
+                else if (resolved.NewCategoryName is not null)
+                {
+                    var match = canonicalCategories.Keys.FirstOrDefault(
+                        k => string.Equals(k, resolved.NewCategoryName, StringComparison.OrdinalIgnoreCase));
+                    if (match is not null)
+                        categoryCanonicalId = canonicalCategories[match];
+                }
+            }
+
+            var transactionId = await InsertTransactionAsync(
+                connection, transaction, source, accountId, batchId,
+                insert.Transaction, realHash, categoryCanonicalId);
+
+            var suggestionCategoryKey = llmResult?.Category ?? llmResult?.NewCategoryName;
+            if (llmResult?.Suggestion is not null &&
+                llmResult.Confidence < confidenceThreshold &&
+                suggestionCategoryKey is not null &&
+                canonicalCategories.TryGetValue(suggestionCategoryKey, out var suggestionCategoryId))
+            {
+                await InsertRuleSuggestionAsync(
+                    connection, transaction, transactionId,
+                    llmResult.Suggestion, suggestionCategoryId,
+                    llmResult.Confidence, cancellationToken);
+            }
+
+            imported++;
+            byStatus[insert.Transaction.Status] = byStatus.GetValueOrDefault(insert.Transaction.Status) + 1;
+        }
+
+        logger?.LogInformation(
+            "PERSIST[batch={BatchId}] insert loop finished: imported={Imported} ignored={Ignored}",
+            batchId, imported, ignored);
 
         return new ImportSummary(imported, ignored, byStatus);
     }
@@ -802,6 +1563,7 @@ public partial class Program
                     ) AS current_count
                 FROM transactions
                 WHERE status <> 'cancelled'
+                  AND is_own_transfer = false
                   AND booking_date >= @priorFrom
                   AND booking_date < @currentTo
                 GROUP BY direction;
@@ -844,6 +1606,7 @@ public partial class Program
                 LEFT JOIN categories ON categories.id = transactions.category_canonical_id
                 WHERE transactions.status <> 'cancelled'
                   AND transactions.direction = 'OUT'
+                  AND transactions.is_own_transfer = false
                   AND transactions.booking_date >= @currentFrom
                   AND transactions.booking_date < @currentTo
                 GROUP BY COALESCE(categories.name, 'Sem categoria')
@@ -874,6 +1637,7 @@ public partial class Program
                 FROM transactions
                 WHERE status <> 'cancelled'
                   AND direction = 'OUT'
+                  AND is_own_transfer = false
                   AND booking_date >= @currentFrom
                   AND booking_date < @currentTo
                 GROUP BY COALESCE(NULLIF(normalized_merchant, ''), raw_description)
@@ -939,6 +1703,39 @@ public partial class Program
         return accounts;
     }
 
+    internal static async Task<IReadOnlyList<MonthlyTrendItem>> LoadMonthlyTrendAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var trends = new List<MonthlyTrendItem>();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                TO_CHAR(transactions.booking_date, 'YYYY-MM') AS month,
+                SUM(CASE WHEN transactions.direction = 'IN' THEN transactions.amount ELSE 0 END) AS credits,
+                SUM(CASE WHEN transactions.direction = 'OUT' THEN ABS(transactions.amount) ELSE 0 END) AS debits
+            FROM transactions
+            WHERE transactions.status <> 'cancelled'
+              AND transactions.is_own_transfer = false
+            GROUP BY TO_CHAR(transactions.booking_date, 'YYYY-MM')
+            ORDER BY month DESC
+            LIMIT 12;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            trends.Add(new MonthlyTrendItem(
+                reader.GetString(0),
+                Math.Round(reader.GetDecimal(1), 2),
+                Math.Round(reader.GetDecimal(2), 2)));
+        }
+
+        trends.Reverse();
+        return trends;
+    }
+
     internal static async Task<IReadOnlyList<DashboardCategorySpend>> LoadSpendingByCategoryAsync(
         NpgsqlConnection connection,
         string month,
@@ -955,6 +1752,7 @@ public partial class Program
             LEFT JOIN categories ON categories.id = transactions.category_canonical_id
             WHERE transactions.direction = 'OUT'
               AND transactions.status <> 'cancelled'
+              AND transactions.is_own_transfer = false
               AND TO_CHAR(transactions.booking_date, 'YYYY-MM') = @month
             GROUP BY COALESCE(categories.name, 'Uncategorized')
             ORDER BY total DESC, category ASC;
@@ -975,6 +1773,8 @@ public partial class Program
     internal static async Task<IReadOnlyList<DashboardTransactionItem>> LoadDashboardTransactionsAsync(
         NpgsqlConnection connection,
         string? month,
+        DateOnly? fromDate,
+        DateOnly? toDate,
         int? accountId,
         string? category,
         string? search,
@@ -1007,6 +1807,18 @@ public partial class Program
         {
             conditions.Add("TO_CHAR(transactions.booking_date, 'YYYY-MM') = @month");
             command.Parameters.AddWithValue("month", month);
+        }
+
+        if (fromDate is not null)
+        {
+            conditions.Add("transactions.booking_date >= @fromDate");
+            command.Parameters.AddWithValue("fromDate", fromDate.Value.ToDateTime(TimeOnly.MinValue));
+        }
+
+        if (toDate is not null)
+        {
+            conditions.Add("transactions.booking_date <= @toDate");
+            command.Parameters.AddWithValue("toDate", toDate.Value.ToDateTime(TimeOnly.MaxValue));
         }
 
         if (accountId is not null)
@@ -1395,7 +2207,7 @@ public partial class Program
         return (int)(await command.ExecuteScalarAsync())!;
     }
 
-    private static async Task<Dictionary<string, int>> LoadCanonicalCategoriesAsync(
+    internal static async Task<Dictionary<string, int>> LoadCanonicalCategoriesAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         CancellationToken cancellationToken)
@@ -1499,6 +2311,16 @@ public partial class Program
 
     internal sealed record CategoryItem(int Id, string Name);
 
+    internal sealed record ApproveSuggestionRequest(string? Pattern, string? MatchType, int? CategoryId);
+
+    internal sealed record MarkTransferRequest(IReadOnlyList<int>? TransactionIds, bool Mark);
+
+    internal sealed record CreateCategoryRequest(string? Name);
+
+    internal sealed record CreateRuleRequest(string? Pattern, string MatchType, int CategoryId);
+
+    internal sealed record UpdateRuleRequest(string? Pattern, string MatchType, int CategoryId, int Priority);
+
     internal sealed record UpdateTransactionCategoryRequest(
         int CategoryId,
         bool CreateRule,
@@ -1516,6 +2338,11 @@ public partial class Program
         string Category,
         decimal Total);
 
+    internal sealed record MonthlyTrendItem(
+        string Month,
+        decimal Credits,
+        decimal Debits);
+
     internal sealed record DashboardTransactionItem(
         int Id,
         string BookingDate,
@@ -1529,7 +2356,7 @@ public partial class Program
         string AccountName,
         string Source);
 
-    private sealed record TransactionInsertCandidate(
+    internal sealed record TransactionInsertCandidate(
         ParsedTransaction Transaction,
         string? DedupHash,
         int? CategoryCanonicalId,

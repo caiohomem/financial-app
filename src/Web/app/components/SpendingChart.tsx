@@ -1,4 +1,5 @@
 import styles from "../dashboard.module.css";
+import { formatCurrency } from "../lib/format";
 import type { CategorySpend } from "../lib/api";
 
 type SpendingChartProps = {
@@ -45,10 +46,3 @@ export function SpendingChart({ categories, currency }: SpendingChartProps) {
   );
 }
 
-function formatCurrency(value: number, currency: string) {
-  return new Intl.NumberFormat("pt-PT", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 2,
-  }).format(value);
-}

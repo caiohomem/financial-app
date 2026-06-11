@@ -1,9 +1,31 @@
+@import "tailwindcss";
+
 :root {
-  --font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-  --font-body: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
-  --ink-strong: #23242c;
-  --ink-soft: #5f615f;
-  color-scheme: light;
+  /* Tipografia */
+  --font-display: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "Helvetica Neue", sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "Helvetica Neue", sans-serif;
+
+  /* Cores - Dark Mode Premium */
+  --bg-primary: #0B0F14;
+  --bg-secondary: #111827;
+  --bg-tertiary: #161B22;
+  --border: #262D36;
+  --text-primary: #F8FAFC;
+  --text-secondary: #94A3B8;
+  --text-tertiary: #64748B;
+  --accent: #3B82F6;
+  --accent-secondary: #60A5FA;
+  --success: #22C55E;
+  --error: #EF4444;
+  --warning: #F59E0B;
+
+  /* Aliases para os CSS modules legados */
+  --ink-strong: var(--text-primary);
+  --ink-soft: var(--text-secondary);
+  --accent-warm: var(--warning);
+  --surface: var(--bg-secondary);
+
+  color-scheme: dark;
 }
 
 * {
@@ -11,18 +33,24 @@
 }
 
 html {
-  background: #efe7da;
+  background: var(--bg-primary);
 }
 
 body {
   margin: 0;
   font-family: var(--font-body);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.6;
 }
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
+  color: inherit;
 }
 
 a {

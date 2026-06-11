@@ -2,9 +2,9 @@
   min-height: 100vh;
   color: var(--ink-strong);
   background:
-    radial-gradient(circle at top left, rgba(242, 170, 76, 0.18), transparent 30%),
-    radial-gradient(circle at top right, rgba(26, 79, 70, 0.18), transparent 26%),
-    linear-gradient(180deg, #f5f0e8 0%, #efe7da 45%, #e8dcc8 100%);
+    radial-gradient(circle at top left, rgba(245, 158, 11, 0.15), transparent 30%),
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.2), transparent 26%),
+    linear-gradient(180deg, var(--bg-primary) 0%, var(--bg-primary) 45%, var(--border) 100%);
 }
 
 .shell {
@@ -37,12 +37,12 @@
 
 .title {
   margin: 0;
-  max-width: 10ch;
   font-family: var(--font-display);
-  font-size: clamp(3rem, 8vw, 5.75rem);
-  line-height: 0.96;
+  font-size: clamp(1.75rem, 3.5vw, 2.6rem);
+  line-height: 1.1;
   font-weight: 600;
-  letter-spacing: -0.06em;
+  letter-spacing: -0.04em;
+  white-space: nowrap;
 }
 
 .subtitle {
@@ -56,12 +56,12 @@
 .monthSelect {
   min-width: 180px;
   padding: 12px 14px;
-  border: 1px solid rgba(42, 44, 57, 0.16);
+  border: 1px solid rgba(0, 0, 0, 0.45);
   border-radius: 999px;
-  background: rgba(255, 252, 245, 0.82);
+  background: var(--bg-secondary);
   color: var(--ink-strong);
   font: inherit;
-  box-shadow: 0 12px 35px rgba(78, 59, 31, 0.08);
+  box-shadow: 0 12px 35px var(--border);
 }
 
 .grid {
@@ -78,10 +78,10 @@
 .panel {
   position: relative;
   overflow: hidden;
-  border: 1px solid rgba(42, 44, 57, 0.1);
+  border: 1px solid var(--border);
   border-radius: 28px;
-  background: rgba(255, 251, 245, 0.82);
-  box-shadow: 0 28px 70px rgba(73, 52, 25, 0.12);
+  background: var(--bg-secondary);
+  box-shadow: 0 28px 70px var(--border);
   backdrop-filter: blur(16px);
 }
 
@@ -90,7 +90,7 @@
   position: absolute;
   inset: auto 24px 0;
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(42, 44, 57, 0.12), transparent);
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
 }
 
 .panelBody {
@@ -131,8 +131,8 @@
 .summaryCard {
   padding: 18px;
   border-radius: 22px;
-  background: linear-gradient(180deg, rgba(255, 252, 247, 0.98), rgba(243, 233, 219, 0.9));
-  border: 1px solid rgba(42, 44, 57, 0.08);
+  background: linear-gradient(180deg, var(--bg-secondary), var(--bg-tertiary));
+  border: 1px solid var(--border);
 }
 
 .summaryLabel {
@@ -172,8 +172,8 @@
 }
 
 .sourceBadge {
-  background: rgba(212, 161, 81, 0.14);
-  color: #86561a;
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning);
 }
 
 .chartList {
@@ -197,13 +197,13 @@
   height: 13px;
   overflow: hidden;
   border-radius: 999px;
-  background: rgba(42, 44, 57, 0.08);
+  background: var(--border);
 }
 
 .chartBar {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #1f5f55, #d58b2f);
+  background: linear-gradient(90deg, var(--accent), var(--warning));
 }
 
 .chartValue {
@@ -216,15 +216,19 @@
 .emptyState {
   padding: 18px;
   border-radius: 18px;
-  background: rgba(42, 44, 57, 0.04);
+  background: rgba(0, 0, 0, 0.25);
   color: var(--ink-soft);
 }
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 16px;
+}
+
+.filterFieldWide {
+  grid-column: span 1;
 }
 
 .filterField {
@@ -243,9 +247,9 @@
 .filterField select {
   width: 100%;
   padding: 11px 12px;
-  border: 1px solid rgba(42, 44, 57, 0.12);
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background: rgba(255, 253, 249, 0.95);
+  background: var(--bg-tertiary);
   color: var(--ink-strong);
   font: inherit;
 }
@@ -261,7 +265,7 @@
 
 .table th {
   padding: 0 0 10px;
-  border-bottom: 1px solid rgba(42, 44, 57, 0.08);
+  border-bottom: 1px solid var(--border);
   color: var(--ink-soft);
   font-size: 0.76rem;
   letter-spacing: 0.12em;
@@ -271,7 +275,7 @@
 
 .table td {
   padding: 14px 0;
-  border-bottom: 1px solid rgba(42, 44, 57, 0.06);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.3);
   vertical-align: top;
 }
 
@@ -294,11 +298,11 @@
 }
 
 .amountOut {
-  color: #8f3b2f;
+  color: var(--error);
 }
 
 .amountIn {
-  color: #1f6b52;
+  color: var(--success);
 }
 
 .mutedRow {
@@ -312,8 +316,8 @@
 }
 
 .statusBadgeCompleted {
-  background: rgba(31, 107, 82, 0.12);
-  color: #1f6b52;
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
 }
 
 .statusBadgePending {
@@ -323,7 +327,7 @@
 
 .statusBadgeCancelled {
   background: rgba(143, 59, 47, 0.12);
-  color: #8f3b2f;
+  color: var(--error);
 }
 
 .statusBadgeRefunded {
@@ -344,9 +348,9 @@
   max-width: 480px;
   padding: 28px;
   border-radius: 28px;
-  background: rgba(255, 251, 245, 0.88);
-  border: 1px solid rgba(42, 44, 57, 0.1);
-  box-shadow: 0 28px 70px rgba(73, 52, 25, 0.12);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  box-shadow: 0 28px 70px var(--border);
 }
 
 .errorCard button {
@@ -354,8 +358,8 @@
   padding: 12px 18px;
   border: 0;
   border-radius: 999px;
-  background: #1f5f55;
-  color: #f7f0e4;
+  background: var(--accent);
+  color: var(--bg-tertiary);
   font: inherit;
   cursor: pointer;
 }

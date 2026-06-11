@@ -44,6 +44,15 @@ public sealed class RuleManager
         return RuleCreationResult.Success(recategorizedTransactions);
     }
 
+    public Task<int> RecategorizeByRuleAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        string pattern,
+        string matchType,
+        int categoryCanonicalId,
+        CancellationToken cancellationToken) =>
+        RecategorizeTransactionsAsync(connection, transaction, pattern, matchType, categoryCanonicalId, cancellationToken);
+
     private static async Task<int> RecategorizeTransactionsAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,

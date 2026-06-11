@@ -1,4 +1,7 @@
+import Link from "next/link";
 import styles from "../dashboard.module.css";
+import ui from "../styles/ui.module.css";
+import { formatCurrency, formatDate } from "../lib/format";
 import type { DashboardTransaction } from "../lib/api";
 
 type TransactionListProps = {
@@ -70,7 +73,7 @@ export function TransactionList({
             </select>
           </div>
 
-          <div className={styles.filterField}>
+          <div className={`${styles.filterField} ${styles.filterFieldWide}`}>
             <label htmlFor="merchant-filter">Merchant</label>
             <input
               id="merchant-filter"
@@ -80,15 +83,18 @@ export function TransactionList({
               onChange={(event) => onSearchChange(event.target.value)}
             />
           </div>
-
-          <div className={styles.filterField}>
-            <label htmlFor="status-note">Estado</label>
-            <input id="status-note" value="Cancelled visivel, mas fora dos totais" readOnly />
-          </div>
         </div>
 
         {transactions.length === 0 ? (
-          <div className={styles.emptyState}>Nenhuma transacao corresponde aos filtros selecionados.</div>
+          <div className={ui.emptyState}>
+            Nenhuma transação corresponde aos filtros selecionados.
+            {accounts.length === 0 ? (
+              <>
+                {" "}
+                <Link href="/import">Importe um extrato</Link> para começar.
+              </>
+            ) : null}
+          </div>
         ) : (
           <div className={styles.tableWrap}>
             <table className={styles.table}>
@@ -155,22 +161,6 @@ export function TransactionList({
       </div>
     </section>
   );
-}
-
-function formatCurrency(value: number, currency: string) {
-  return new Intl.NumberFormat("pt-PT", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 2,
-  }).format(value);
-}
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("pt-PT", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00`));
 }
 
 function statusClassName(status: DashboardTransaction["status"]) {
